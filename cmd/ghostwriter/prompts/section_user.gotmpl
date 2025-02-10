@@ -1,0 +1,9 @@
+Given the contextual informations you have, write a text explaining and focusing on:
+
+{{ .Topic }}
+
+{{ if .PreviousContent }}
+You must avoid to repeat informations already provided in the following content:
+
+{{ .PreviousContent }}
+{{ end }}
