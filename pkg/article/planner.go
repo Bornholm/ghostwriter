@@ -383,7 +383,8 @@ func (h *PlannerHandler) createDocumentPlanSchema() llm.ResponseSchema {
 							"minimum":     1,
 						},
 					},
-					"required": []string{"id", "title", "description", "key_points", "word_count", "priority"},
+					"required":             []string{"id", "title", "description", "key_points", "word_count", "priority"},
+					"additionalProperties": false,
 				},
 			},
 			"total_words": map[string]any{
@@ -399,7 +400,8 @@ func (h *PlannerHandler) createDocumentPlanSchema() llm.ResponseSchema {
 				},
 			},
 		},
-		"required": []string{"title", "summary", "sections", "total_words", "keywords"},
+		"required":             []string{"title", "summary", "sections", "total_words", "keywords"},
+		"additionalProperties": false,
 	}
 
 	return llm.NewResponseSchema(
