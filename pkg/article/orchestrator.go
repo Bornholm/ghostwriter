@@ -29,6 +29,24 @@ type OrchestratorOptions struct {
 	Timeout              time.Duration
 	TargetWordCount      int
 	ResearchDepth        ResearchDepth
+	StyleGuidelines      string
+	AdditionalContext    string
+	Tools                []llm.Tool
+}
+
+func NewOrchestratorOptions(optFuncs ...OrchestratorOptionFunc) *OrchestratorOptions {
+	// Apply options
+	opts := &OrchestratorOptions{
+		MaxConcurrentWriters: 3,
+		Timeout:              30 * time.Minute,
+		TargetWordCount:      1500,
+		ResearchDepth:        ResearchDeep,
+		Tools:                tool.GetDefaultResearchTools(),
+	}
+	for _, fn := range optFuncs {
+		fn(opts)
+	}
+	return opts
 }
 
 // OrchestratorOptionFunc is a function that configures orchestrator options
@@ -62,22 +80,44 @@ func WithResearchDepth(depth ResearchDepth) OrchestratorOptionFunc {
 	}
 }
 
+// WithStyleGuidelines sets the style guidelines for all agents
+func WithStyleGuidelines(styleGuidelines string) OrchestratorOptionFunc {
+	return func(opts *OrchestratorOptions) {
+		opts.StyleGuidelines = styleGuidelines
+	}
+}
+
+// WithTools sets the tools for all agents
+func WithTools(tools []llm.Tool) OrchestratorOptionFunc {
+	return func(opts *OrchestratorOptions) {
+		opts.Tools = tools
+	}
+}
+
+// WithAdditionalContext sets additional context information for all agents
+func WithAdditionalContext(additionalContext string) OrchestratorOptionFunc {
+	return func(opts *OrchestratorOptions) {
+		opts.AdditionalContext = additionalContext
+	}
+}
+
 // WriteArticle orchestrates the complete article writing process
 func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFuncs ...OrchestratorOptionFunc) (ArticleDocument, error) {
-	// Apply options
-	opts := &OrchestratorOptions{
-		MaxConcurrentWriters: 3,
-		Timeout:              30 * time.Minute,
-		TargetWordCount:      1500,
-		ResearchDepth:        ResearchDeep,
-	}
-	for _, fn := range optFuncs {
-		fn(opts)
-	}
+	opts := NewOrchestratorOptions(optFuncs...)
 
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
+
+	// Add style guidelines to context if provided
+	if opts.StyleGuidelines != "" {
+		ctx = WithContextStyleGuidelines(ctx, opts.StyleGuidelines)
+	}
+
+	// Add additional context to context if provided
+	if opts.AdditionalContext != "" {
+		ctx = WithContextAdditionalContext(ctx, opts.AdditionalContext)
+	}
 
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
@@ -89,7 +129,7 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 
 	// Step 1: Generate document plan
 	tracker.EmitPhaseStart(PhasePlanning, "Starting document planning and research", GetPhaseBaseProgress(PhasePlanning))
-	plan, err := o.generatePlan(ctx, subject, opts.TargetWordCount)
+	plan, err := o.generatePlan(ctx, subject, opts.TargetWordCount, opts)
 	if err != nil {
 		return ArticleDocument{}, errors.WithStack(err)
 	}
@@ -119,11 +159,21 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 }
 
 // generatePlan uses the planner agent to create a document plan
-func (o *Orchestrator) generatePlan(ctx context.Context, subject string, targetWordCount int) (DocumentPlan, error) {
+func (o *Orchestrator) generatePlan(ctx context.Context, subject string, targetWordCount int, opts *OrchestratorOptions) (DocumentPlan, error) {
 	// Create planning context
 	planCtx := WithContextAgentRole(ctx, RolePlanner)
 	planCtx = WithContextSubject(planCtx, subject)
 	planCtx = WithContextTargetWordCount(planCtx, targetWordCount)
+
+	// Add style guidelines if provided
+	if opts.StyleGuidelines != "" {
+		planCtx = WithContextStyleGuidelines(planCtx, opts.StyleGuidelines)
+	}
+
+	// Add additional context if provided
+	if opts.AdditionalContext != "" {
+		planCtx = WithContextAdditionalContext(planCtx, opts.AdditionalContext)
+	}
 
 	// Send planning request
 	planRequest := agent.NewMessageEvent(planCtx, subject)
@@ -243,6 +293,18 @@ func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection
 	writeCtx = WithContextResearchDepth(writeCtx, depth)
 	writeCtx = WithContextWriterID(writeCtx, fmt.Sprintf("writer_%d", writerIndex))
 
+	// Add style guidelines if available from parent context
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	if styleGuidelines != "" {
+		writeCtx = WithContextStyleGuidelines(writeCtx, styleGuidelines)
+	}
+
+	// Add additional context if available from parent context
+	additionalContext := ContextAdditionalContext(ctx, "")
+	if additionalContext != "" {
+		writeCtx = WithContextAdditionalContext(writeCtx, additionalContext)
+	}
+
 	// Create section assignment
 	assignment := NewSectionAssignmentEvent(writeCtx, section, subject, nil)
 
@@ -271,6 +333,18 @@ func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection
 func (o *Orchestrator) editArticle(ctx context.Context, plan DocumentPlan, sections []SectionContent, subject string) (ArticleDocument, error) {
 	// Create editing context
 	editCtx := WithContextAgentRole(ctx, RoleEditor)
+
+	// Add style guidelines if available from parent context
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	if styleGuidelines != "" {
+		editCtx = WithContextStyleGuidelines(editCtx, styleGuidelines)
+	}
+
+	// Add additional context if available from parent context
+	additionalContext := ContextAdditionalContext(ctx, "")
+	if additionalContext != "" {
+		editCtx = WithContextAdditionalContext(editCtx, additionalContext)
+	}
 
 	// Create edit request
 	editRequest := NewEditRequestEvent(editCtx, plan.Title, subject, sections, plan)
@@ -376,8 +450,10 @@ func NewOrchestrator(client llm.ChatCompletionClient, tools []llm.Tool) *Orchest
 
 // WriteArticle is a convenience function to create an orchestrator and write an article
 func WriteArticle(ctx context.Context, client llm.ChatCompletionClient, subject string, optFuncs ...OrchestratorOptionFunc) (ArticleDocument, error) {
+	opts := NewOrchestratorOptions(optFuncs...)
+
 	// Create orchestrator with default research tools
-	orchestrator := NewOrchestrator(client, tool.GetDefaultResearchTools())
+	orchestrator := NewOrchestrator(client, opts.Tools)
 
 	// Start the orchestrator
 	if err := orchestrator.Start(ctx); err != nil {

@@ -51,6 +51,18 @@ func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 	writingCtx = WithContextResearchDepth(writingCtx, researchDepth)
 	writingCtx = agent.WithContextTools(writingCtx, h.tools)
 
+	// Pass through style guidelines if available
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	if styleGuidelines != "" {
+		writingCtx = WithContextStyleGuidelines(writingCtx, styleGuidelines)
+	}
+
+	// Pass through additional context if available
+	additionalContext := ContextAdditionalContext(ctx, "")
+	if additionalContext != "" {
+		writingCtx = WithContextAdditionalContext(writingCtx, additionalContext)
+	}
+
 	// Write the section content
 	content, err := h.writeSection(writingCtx, section, subject)
 	if err != nil {
@@ -89,7 +101,9 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 	}
 
 	// Create the section assignment prompt
-	userPrompt := h.createSectionPrompt(section, subject)
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	additionalContext := ContextAdditionalContext(ctx, "")
+	userPrompt := h.createSectionPrompt(section, subject, styleGuidelines, additionalContext)
 
 	// Emit progress for research start
 	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("[%s] Starting research for: %s", writerID, section.Title),
@@ -178,7 +192,7 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 }
 
 // createSectionPrompt creates the user prompt for section writing
-func (h *WriterHandler) createSectionPrompt(section DocumentSection, subject string) string {
+func (h *WriterHandler) createSectionPrompt(section DocumentSection, subject string, styleGuidelines string, additionalContext string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Write a comprehensive section for an article about: ")
@@ -210,7 +224,26 @@ func (h *WriterHandler) createSectionPrompt(section DocumentSection, subject str
 	prompt.WriteString("2. Write engaging, well-structured content that covers all key points\n")
 	prompt.WriteString("3. Include proper citations and sources\n")
 	prompt.WriteString("4. Aim for the target word count\n")
-	prompt.WriteString("5. Use a professional yet accessible tone\n\n")
+	prompt.WriteString("5. Use a professional yet accessible tone\n")
+
+	if styleGuidelines != "" {
+		prompt.WriteString("6. Follow the provided style guidelines carefully\n\n")
+		prompt.WriteString("**Style Guidelines:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(styleGuidelines)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Ensure your writing adheres to these style preferences throughout the section.\n\n")
+	} else {
+		prompt.WriteString("\n")
+	}
+
+	if additionalContext != "" {
+		prompt.WriteString("**Additional Context:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(additionalContext)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Please consider this additional context when writing and incorporate relevant information as appropriate.\n\n")
+	}
 
 	prompt.WriteString("Please start by researching the topic, then provide your final section content.")
 

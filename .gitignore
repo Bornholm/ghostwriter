@@ -2,3 +2,5 @@
 *.md
 !README.md
 /*.pdf
+/output
+/style

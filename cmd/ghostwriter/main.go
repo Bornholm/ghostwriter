@@ -9,25 +9,35 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bornholm/genai/llm/circuitbreaker"
 	"github.com/bornholm/genai/llm/provider"
+	"github.com/bornholm/genai/llm/ratelimit"
 	"github.com/bornholm/genai/llm/retry"
 	"github.com/bornholm/ghostwriter/pkg/article"
+	"github.com/bornholm/ghostwriter/pkg/tool"
 	"github.com/gosimple/slug"
 	"github.com/pkg/errors"
 
 	_ "github.com/bornholm/genai/llm/provider/all"
+	"github.com/bornholm/genai/llm/provider/openrouter"
 
 	"github.com/bornholm/genai/llm/provider/env"
 )
 
 var (
-	subject string
-	output  string
+	subject                   string
+	output                    string
+	styleGuidelinesFilename   string
+	additionalContextFilename string
+	workspace                 string
 )
 
 func init() {
 	flag.StringVar(&subject, "subject", "", "the article subject")
 	flag.StringVar(&output, "output", "", "filename of the resulting article, default to slug of title")
+	flag.StringVar(&styleGuidelinesFilename, "style", "", "filename containing the writing style guidelines")
+	flag.StringVar(&additionalContextFilename, "context", "", "filename containing additional context information for the agents")
+	flag.StringVar(&workspace, "workspace", "", "workspace directory that the agent can access")
 }
 
 func main() {
@@ -45,13 +55,19 @@ func main() {
 	defer cancel()
 
 	// Create a LLM chat completion client
-	client, err := provider.Create(ctx, env.With("GHOSTWRITER_", ".env"))
+	baseClient, err := provider.Create(ctx, env.With("GHOSTWRITER_", ".env"))
 	if err != nil {
 		log.Fatalf("%+v", errors.WithStack(err))
 	}
 
-	// Add retry wrapper for resilience
-	client = retry.Wrap(client, time.Second, 3)
+	// Wrap with retry logic (3 retries with 1 second base delay)
+	retryClient := retry.Wrap(baseClient, time.Second, 3)
+
+	// Wrap with rate limiting (max 30 requests per minute)
+	rateLimitedClient := ratelimit.Wrap(retryClient, time.Minute/30, 1)
+
+	// Wrap with circuit breaker (max 5 failures, 5 second reset timeout)
+	resilientClient := circuitbreaker.NewClient(rateLimitedClient, 5, 5*time.Second)
 
 	// Generate article
 	log.Println("=== GHOSTWRITER ===")
@@ -61,16 +77,66 @@ func main() {
 	progressCh, progressCallback := article.ProgressEventChannel()
 	ctx = article.WithProgressTracking(ctx, progressCallback)
 
-	// Start simple progress logging goroutine
-	done := make(chan bool)
-	go logProgress(progressCh, done)
-
-	// Generate the article using the multi-agent system
-	generatedArticle, err := article.WriteArticle(ctx, client, subject,
+	orchestratorOptions := []article.OrchestratorOptionFunc{
 		article.WithTargetWordCount(2000),
 		article.WithMaxConcurrentWriters(2),
 		article.WithResearchDepth(article.ResearchDeep),
 		article.WithTimeout(time.Hour),
+	}
+
+	if styleGuidelinesFilename != "" {
+		data, err := os.ReadFile(styleGuidelinesFilename)
+		if err != nil {
+			log.Fatalf("Failed to read style guidelines file: %+v", errors.WithStack(err))
+		}
+
+		orchestratorOptions = append(orchestratorOptions, article.WithStyleGuidelines(string(data)))
+	}
+
+	var additionalContext strings.Builder
+
+	if additionalContextFilename != "" {
+		data, err := os.ReadFile(additionalContextFilename)
+		if err != nil {
+			log.Fatalf("Failed to read additional context file: %+v", errors.WithStack(err))
+		}
+
+		additionalContext.WriteString(string(data))
+	}
+
+	if workspace != "" {
+		root, err := os.OpenRoot(workspace)
+		if err != nil {
+			log.Fatalf("Failed to read style guidelines file: %+v", errors.WithStack(err))
+		}
+
+		tools := tool.GetDefaultResearchTools()
+		tools = append(tools, tool.NewFSTools(root.FS())...)
+
+		tree, err := tool.GenerateDirectoryTree(root.FS(), ".", ".git")
+		if err != nil {
+			log.Fatalf("Failed to generate workspace directory tree: %+v", errors.WithStack(err))
+		}
+
+		additionalContext.WriteString("\n\n**Workspace:**\n\n")
+		additionalContext.WriteString("This is the directory tree of the files you have access to:\n\n")
+		additionalContext.WriteString(tree)
+
+		orchestratorOptions = append(orchestratorOptions, article.WithTools(tools))
+	}
+
+	orchestratorOptions = append(orchestratorOptions, article.WithAdditionalContext(additionalContext.String()))
+
+	// Start simple progress logging goroutine
+	done := make(chan bool)
+	go logProgress(progressCh, done)
+
+	// Enable middle-out transforms when using openrouter provider
+	ctx = openrouter.WithTransforms(ctx, []string{"middle-out"})
+
+	// Generate the article using the multi-agent system
+	generatedArticle, err := article.WriteArticle(ctx, resilientClient, subject,
+		orchestratorOptions...,
 	)
 
 	// Signal progress logging to stop

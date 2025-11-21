@@ -122,7 +122,9 @@ func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEve
 		})
 
 	// Create the editing prompt with all sections
-	userPrompt := h.createEditingPrompt(request)
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	additionalContext := ContextAdditionalContext(ctx, "")
+	userPrompt := h.createEditingPrompt(request, styleGuidelines, additionalContext)
 
 	messages := []llm.Message{
 		llm.NewMessage(llm.RoleSystem, systemPrompt),
@@ -173,7 +175,7 @@ func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEve
 }
 
 // createEditingPrompt creates the user prompt for editing
-func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent) string {
+func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, styleGuidelines string, additionalContext string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Please edit and finalize the following article:\n\n")
@@ -214,7 +216,26 @@ func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent) string {
 	prompt.WriteString("4. Ensure consistent tone and style throughout\n")
 	prompt.WriteString("5. Consolidate and properly format all sources\n")
 	prompt.WriteString("6. Optimize for readability and engagement\n")
-	prompt.WriteString("7. Maintain all factual content and research\n\n")
+	prompt.WriteString("7. Maintain all factual content and research\n")
+
+	if styleGuidelines != "" {
+		prompt.WriteString("8. Apply and enforce the provided style guidelines throughout the article\n\n")
+		prompt.WriteString("**Style Guidelines to Apply:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(styleGuidelines)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Ensure the final article consistently follows these style preferences in formatting, tone, structure, and presentation.\n\n")
+	} else {
+		prompt.WriteString("\n")
+	}
+
+	if additionalContext != "" {
+		prompt.WriteString("**Additional Context:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(additionalContext)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Please consider this additional context when editing and incorporate relevant information as appropriate.\n\n")
+	}
 
 	prompt.WriteString("Please provide the complete, edited article in the specified format.")
 

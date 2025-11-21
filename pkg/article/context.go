@@ -7,12 +7,14 @@ import (
 )
 
 const (
-	ContextKeyDocumentPlan    agent.ContextKey = "article_document_plan"
-	ContextKeySubject         agent.ContextKey = "article_subject"
-	ContextKeyTargetWordCount agent.ContextKey = "article_target_word_count"
-	ContextKeyResearchDepth   agent.ContextKey = "article_research_depth"
-	ContextKeyWriterID        agent.ContextKey = "article_writer_id"
-	ContextKeyAgentRole       agent.ContextKey = "article_agent_role"
+	ContextKeyDocumentPlan      agent.ContextKey = "article_document_plan"
+	ContextKeySubject           agent.ContextKey = "article_subject"
+	ContextKeyTargetWordCount   agent.ContextKey = "article_target_word_count"
+	ContextKeyResearchDepth     agent.ContextKey = "article_research_depth"
+	ContextKeyWriterID          agent.ContextKey = "article_writer_id"
+	ContextKeyAgentRole         agent.ContextKey = "article_agent_role"
+	ContextKeyStyleGuidelines   agent.ContextKey = "article_style_guidelines"
+	ContextKeyAdditionalContext agent.ContextKey = "article_additional_context"
 )
 
 // AgentRole defines the role of an agent in the article writing process
@@ -94,4 +96,24 @@ func WithContextAgentRole(ctx context.Context, role AgentRole) context.Context {
 // ContextAgentRole retrieves the agent role from context
 func ContextAgentRole(ctx context.Context, defaultRole AgentRole) AgentRole {
 	return agent.ContextValue(ctx, ContextKeyAgentRole, defaultRole)
+}
+
+// WithContextStyleGuidelines adds style guidelines to the context
+func WithContextStyleGuidelines(ctx context.Context, styleGuidelines string) context.Context {
+	return context.WithValue(ctx, ContextKeyStyleGuidelines, styleGuidelines)
+}
+
+// ContextStyleGuidelines retrieves the style guidelines from context
+func ContextStyleGuidelines(ctx context.Context, defaultGuidelines string) string {
+	return agent.ContextValue(ctx, ContextKeyStyleGuidelines, defaultGuidelines)
+}
+
+// WithContextAdditionalContext adds additional context information to the context
+func WithContextAdditionalContext(ctx context.Context, additionalContext string) context.Context {
+	return context.WithValue(ctx, ContextKeyAdditionalContext, additionalContext)
+}
+
+// ContextAdditionalContext retrieves the additional context information from context
+func ContextAdditionalContext(ctx context.Context, defaultContext string) string {
+	return agent.ContextValue(ctx, ContextKeyAdditionalContext, defaultContext)
 }

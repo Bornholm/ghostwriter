@@ -46,6 +46,18 @@ func (h *PlannerHandler) Handle(input agent.Event, outputs chan agent.Event) err
 	planningCtx := WithContextSubject(ctx, subject)
 	planningCtx = WithContextTargetWordCount(planningCtx, targetWordCount)
 
+	// Pass through style guidelines if available
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	if styleGuidelines != "" {
+		planningCtx = WithContextStyleGuidelines(planningCtx, styleGuidelines)
+	}
+
+	// Pass through additional context if available
+	additionalContext := ContextAdditionalContext(ctx, "")
+	if additionalContext != "" {
+		planningCtx = WithContextAdditionalContext(planningCtx, additionalContext)
+	}
+
 	// Generate the document plan with research
 	plan, err := h.generatePlanWithResearch(planningCtx, subject, targetWordCount)
 	if err != nil {
@@ -77,7 +89,9 @@ func (h *PlannerHandler) generatePlanWithResearch(ctx context.Context, subject s
 	}
 
 	// Create the research and planning prompt
-	userPrompt := h.createResearchPlanningPrompt(subject, targetWordCount)
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	additionalContext := ContextAdditionalContext(ctx, "")
+	userPrompt := h.createResearchPlanningPrompt(subject, targetWordCount, styleGuidelines, additionalContext)
 
 	// Create JSON schema for DocumentPlan
 	planSchema := h.createDocumentPlanSchema()
@@ -150,7 +164,7 @@ func (h *PlannerHandler) generatePlanWithResearch(ctx context.Context, subject s
 }
 
 // createResearchPlanningPrompt creates the user prompt for research-based planning
-func (h *PlannerHandler) createResearchPlanningPrompt(subject string, targetWordCount int) string {
+func (h *PlannerHandler) createResearchPlanningPrompt(subject string, targetWordCount int, styleGuidelines string, additionalContext string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Create a comprehensive, research-informed document plan for an article on the following subject:\n\n")
@@ -164,7 +178,12 @@ func (h *PlannerHandler) createResearchPlanningPrompt(subject string, targetWord
 	prompt.WriteString("- Create a well-structured, engaging article plan\n")
 	prompt.WriteString("- Ensure comprehensive coverage of the topic\n")
 	prompt.WriteString("- Design sections that can be researched and written independently\n")
-	prompt.WriteString("- Include specific guidance for writers\n\n")
+	prompt.WriteString("- Include specific guidance for writers\n")
+
+	if styleGuidelines != "" {
+		prompt.WriteString("- Follow the provided style guidelines throughout the article\n")
+	}
+	prompt.WriteString("\n")
 	prompt.WriteString("**Instructions:**\n")
 	prompt.WriteString("1. **First, conduct preliminary research** using your available tools to understand:\n")
 	prompt.WriteString("   - Current developments and trends related to the subject\n")
@@ -173,7 +192,26 @@ func (h *PlannerHandler) createResearchPlanningPrompt(subject string, targetWord
 	prompt.WriteString("   - Relevant examples, case studies, or data points\n\n")
 	prompt.WriteString("2. **Then, create a detailed document plan** based on your research findings\n")
 	prompt.WriteString("3. **Ensure the plan reflects current, accurate information** from your research\n")
-	prompt.WriteString("4. **Include research-informed key points** for each section\n\n")
+	prompt.WriteString("4. **Include research-informed key points** for each section\n")
+
+	if styleGuidelines != "" {
+		prompt.WriteString("5. **Consider the following style guidelines** when planning the article structure and content:\n\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(styleGuidelines)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Ensure the document plan reflects these style preferences and includes guidance for writers to follow them.\n\n")
+	} else {
+		prompt.WriteString("\n")
+	}
+
+	if additionalContext != "" {
+		prompt.WriteString("**Additional Context:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(additionalContext)
+		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("Please consider this additional context when planning and incorporate relevant information as appropriate.\n\n")
+	}
+
 	prompt.WriteString("Please start by researching the topic thoroughly, then provide your final document plan in the specified JSON format.")
 
 	return prompt.String()
