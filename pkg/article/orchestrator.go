@@ -3,6 +3,7 @@ package article
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 
 // Orchestrator coordinates the multi-agent article writing process
 type Orchestrator struct {
-	plannerAgent *agent.Agent
-	writerAgents []*agent.Agent
-	editorAgent  *agent.Agent
+	researchAgent *agent.Agent // NEW
+	plannerAgent  *agent.Agent
+	writerAgents  []*agent.Agent
+	editorAgent   *agent.Agent
 
 	// Configuration
 	maxConcurrentWriters int
@@ -102,7 +104,7 @@ func WithAdditionalContext(additionalContext string) OrchestratorOptionFunc {
 }
 
 // WriteArticle orchestrates the complete article writing process
-func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFuncs ...OrchestratorOptionFunc) (ArticleDocument, error) {
+func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFuncs ...OrchestratorOptionFunc) (Document, error) {
 	opts := NewOrchestratorOptions(optFuncs...)
 
 	// Create context with timeout
@@ -127,35 +129,100 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 		"max_writers":       opts.MaxConcurrentWriters,
 	})
 
-	// Step 1: Generate document plan
-	tracker.EmitPhaseStart(PhasePlanning, "Starting document planning and research", GetPhaseBaseProgress(PhasePlanning))
+	// Step 1: Conduct comprehensive research and build knowledge base
+	tracker.EmitPhaseStart(PhaseResearching, "Starting comprehensive research", GetPhaseBaseProgress(PhaseResearching))
+	kb, err := o.conductResearch(ctx, subject, opts.ResearchDepth)
+	if err != nil {
+		return Document{}, errors.WithStack(err)
+	}
+	// Add knowledge base to context for subsequent phases
+	ctx = WithContextKnowledgeBase(ctx, kb)
+	ctx = WithContextResearchComplete(ctx, true)
+	tracker.EmitPhaseComplete(PhaseResearching, "Research completed", GetPhaseBaseProgress(PhasePlanning))
+
+	// Step 2: Generate document plan using knowledge base
+	tracker.EmitPhaseStart(PhasePlanning, "Starting document planning", GetPhaseBaseProgress(PhasePlanning))
 	plan, err := o.generatePlan(ctx, subject, opts.TargetWordCount, opts)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 	tracker.EmitPhaseComplete(PhasePlanning, "Document plan completed", GetPhaseBaseProgress(PhaseWriting))
 
-	// Step 2: Write sections concurrently
+	// Step 3: Write sections using knowledge base
 	tracker.EmitPhaseStart(PhaseWriting, "Starting section writing", GetPhaseBaseProgress(PhaseWriting))
 	sections, err := o.writeSections(ctx, plan, subject, opts)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 	tracker.EmitPhaseComplete(PhaseWriting, "All sections completed", GetPhaseBaseProgress(PhaseEditing))
 
-	// Step 3: Edit and finalize article
+	// Step 4: Edit and finalize article
 	tracker.EmitPhaseStart(PhaseEditing, "Starting article editing and finalization", GetPhaseBaseProgress(PhaseEditing))
 	article, err := o.editArticle(ctx, plan, sections, subject)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
+	tracker.EmitPhaseComplete(PhaseEditing, "Article editing completed", GetPhaseBaseProgress(PhaseAttributing))
+
 	tracker.EmitProgress(PhaseCompleted, "Article generation completed", 1.0, map[string]interface{}{
 		"final_word_count": article.WordCount,
 		"sections_count":   len(article.Sections),
-		"sources_count":    len(article.Sources),
+	})
+
+	// Step 5: Collecte research documents
+	documents := kb.GetAllDocuments()
+	for _, d := range documents {
+		article.Sources = append(article.Sources, Source{
+			ID:         d.ID,
+			URL:        d.URL,
+			Title:      d.Title,
+			Keywords:   d.Keywords,
+			SourceType: d.SourceType,
+			Relevance:  d.Relevance,
+		})
+	}
+
+	slices.SortFunc(article.Sources, func(a Source, b Source) int {
+		if a.Relevance > b.Relevance {
+			return -1
+		}
+		if a.Relevance < b.Relevance {
+			return 1
+		}
+		return 0
 	})
 
 	return article, nil
+}
+
+// conductResearch uses the research agent to build knowledge base
+func (o *Orchestrator) conductResearch(ctx context.Context, subject string, depth ResearchDepth) (*KnowledgeBase, error) {
+	// Create research context
+	researchCtx := WithContextAgentRole(ctx, RoleResearcher)
+	researchCtx = WithContextSubject(researchCtx, subject)
+	researchCtx = WithContextResearchDepth(researchCtx, depth)
+
+	// Send research request
+	researchRequest := NewResearchRequestEvent(researchCtx, subject, depth)
+	if err := o.researchAgent.In(researchRequest); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	// Wait for research result
+	select {
+	case evt := <-o.researchAgent.Output():
+		if researchEvent, ok := evt.(*ResearchCompleteEvent); ok {
+			// Research events don't need to match request ID since they're generated internally
+			return researchEvent.KB, nil
+		}
+		return nil, errors.New("unexpected event type from researcher")
+
+	case err := <-o.researchAgent.Err():
+		return nil, errors.WithStack(err)
+
+	case <-ctx.Done():
+		return nil, errors.WithStack(ctx.Err())
+	}
 }
 
 // generatePlan uses the planner agent to create a document plan
@@ -268,7 +335,6 @@ func (o *Orchestrator) writeSections(ctx context.Context, plan DocumentPlan, sub
 					"actual_word_count":  content.WordCount,
 					"completed_sections": completedSections,
 					"total_sections":     totalSections,
-					"written_by":         content.WrittenBy,
 				})
 		}(i, section)
 	}
@@ -330,7 +396,7 @@ func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection
 }
 
 // editArticle uses the editor agent to finalize the article
-func (o *Orchestrator) editArticle(ctx context.Context, plan DocumentPlan, sections []SectionContent, subject string) (ArticleDocument, error) {
+func (o *Orchestrator) editArticle(ctx context.Context, plan DocumentPlan, sections []SectionContent, subject string) (Document, error) {
 	// Create editing context
 	editCtx := WithContextAgentRole(ctx, RoleEditor)
 
@@ -349,10 +415,8 @@ func (o *Orchestrator) editArticle(ctx context.Context, plan DocumentPlan, secti
 	// Create edit request
 	editRequest := NewEditRequestEvent(editCtx, plan.Title, subject, sections, plan)
 
-	// Alternative: Use the editor agent (commented out for now)
-
 	if err := o.editorAgent.In(editRequest); err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 
 	// Wait for result
@@ -362,18 +426,23 @@ func (o *Orchestrator) editArticle(ctx context.Context, plan DocumentPlan, secti
 			return articleEvent.Article(), nil
 		}
 
-		return ArticleDocument{}, errors.New("unexpected event type from editor")
+		return Document{}, errors.New("unexpected event type from editor")
 
 	case err := <-o.editorAgent.Err():
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 
 	case <-ctx.Done():
-		return ArticleDocument{}, errors.WithStack(ctx.Err())
+		return Document{}, errors.WithStack(ctx.Err())
 	}
 }
 
 // Start starts all the agents
 func (o *Orchestrator) Start(ctx context.Context) error {
+	// Start research agent
+	if _, _, err := o.researchAgent.Start(ctx); err != nil {
+		return errors.WithStack(err)
+	}
+
 	// Start planner agent
 	if _, _, err := o.plannerAgent.Start(ctx); err != nil {
 		return errors.WithStack(err)
@@ -397,6 +466,11 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 // Stop stops all the agents
 func (o *Orchestrator) Stop() error {
 	var errs []error
+
+	// Stop research agent
+	if err := o.researchAgent.Stop(); err != nil {
+		errs = append(errs, errors.Wrap(err, "failed to stop research agent"))
+	}
 
 	// Stop planner
 	if err := o.plannerAgent.Stop(); err != nil {
@@ -424,14 +498,18 @@ func (o *Orchestrator) Stop() error {
 
 // NewOrchestrator creates a new article writing orchestrator
 func NewOrchestrator(client llm.ChatCompletionClient, tools []llm.Tool) *Orchestrator {
-	// Create specialized agents with research tools
-	plannerHandler := NewPlannerHandler(client, tools...)
+	// Create research agent with research tools
+	researchHandler := NewResearchAgent(client, tools...)
+	researchAgent := agent.New(researchHandler)
+
+	// Create planner agent (no longer needs research tools)
+	plannerHandler := NewPlannerHandler(client)
 	plannerAgent := agent.New(plannerHandler)
 
-	// Create multiple writer agents for concurrent processing
+	// Create multiple writer agents for concurrent processing (no longer need research tools)
 	writerAgents := make([]*agent.Agent, 3)
 	for i := 0; i < 3; i++ {
-		writerHandler := NewWriterHandler(client, tools...)
+		writerHandler := NewWriterHandler(client)
 		writerAgents[i] = agent.New(writerHandler)
 	}
 
@@ -440,6 +518,7 @@ func NewOrchestrator(client llm.ChatCompletionClient, tools []llm.Tool) *Orchest
 	editorAgent := agent.New(editorHandler)
 
 	return &Orchestrator{
+		researchAgent:        researchAgent,
 		plannerAgent:         plannerAgent,
 		writerAgents:         writerAgents,
 		editorAgent:          editorAgent,
@@ -449,7 +528,7 @@ func NewOrchestrator(client llm.ChatCompletionClient, tools []llm.Tool) *Orchest
 }
 
 // WriteArticle is a convenience function to create an orchestrator and write an article
-func WriteArticle(ctx context.Context, client llm.ChatCompletionClient, subject string, optFuncs ...OrchestratorOptionFunc) (ArticleDocument, error) {
+func WriteArticle(ctx context.Context, client llm.ChatCompletionClient, subject string, optFuncs ...OrchestratorOptionFunc) (Document, error) {
 	opts := NewOrchestratorOptions(optFuncs...)
 
 	// Create orchestrator with default research tools
@@ -457,7 +536,7 @@ func WriteArticle(ctx context.Context, client llm.ChatCompletionClient, subject 
 
 	// Start the orchestrator
 	if err := orchestrator.Start(ctx); err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 	defer orchestrator.Stop()
 

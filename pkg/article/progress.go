@@ -102,9 +102,11 @@ func (pt *ProgressTracker) EmitSubProgress(phase ProgressPhase, step string, bas
 
 // Progress phase weights for calculating overall progress
 const (
-	PlanningWeight = 0.20 // 20% of total progress
-	WritingWeight  = 0.60 // 60% of total progress
-	EditingWeight  = 0.20 // 20% of total progress
+	ResearchingWeight = 0.15 // 15% of total progress
+	PlanningWeight    = 0.15 // 15% of total progress
+	WritingWeight     = 0.50 // 50% of total progress
+	EditingWeight     = 0.15 // 15% of total progress
+	AttributingWeight = 0.05 // 5% of total progress
 )
 
 // GetPhaseBaseProgress returns the base progress for a phase
@@ -112,12 +114,16 @@ func GetPhaseBaseProgress(phase ProgressPhase) float64 {
 	switch phase {
 	case PhaseInitializing:
 		return 0.0
-	case PhasePlanning:
+	case PhaseResearching:
 		return 0.0
+	case PhasePlanning:
+		return ResearchingWeight
 	case PhaseWriting:
-		return PlanningWeight
+		return ResearchingWeight + PlanningWeight
 	case PhaseEditing:
-		return PlanningWeight + WritingWeight
+		return ResearchingWeight + PlanningWeight + WritingWeight
+	case PhaseAttributing:
+		return ResearchingWeight + PlanningWeight + WritingWeight + EditingWeight
 	case PhaseCompleted:
 		return 1.0
 	default:

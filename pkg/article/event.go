@@ -9,46 +9,51 @@ import (
 
 // DocumentSection represents a section in the article plan
 type DocumentSection struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	KeyPoints   []string `json:"key_points"`
-	WordCount   int      `json:"word_count"`
-	Priority    int      `json:"priority"`
+	ID          string   `json:"id" jsonschema:"required,description=Unique identifier for the section"`
+	Title       string   `json:"title" jsonschema:"required,description=Title of the section"`
+	Description string   `json:"description" jsonschema:"required,description=Description or guidance for writing this section"`
+	KeyPoints   []string `json:"key_points" jsonschema:"required,description=Key points to cover in this section"`
+	WordCount   int      `json:"word_count" jsonschema:"required,description=Target word count for this section"`
 }
 
 // DocumentPlan represents the complete article structure
 type DocumentPlan struct {
-	Title      string            `json:"title"`
-	Summary    string            `json:"summary"`
-	Sections   []DocumentSection `json:"sections"`
-	TotalWords int               `json:"total_words"`
-	Keywords   []string          `json:"keywords"`
-	CreatedAt  time.Time         `json:"created_at"`
+	Title      string            `json:"title" jsonschema:"required,description=The main title of the article"`
+	Sections   []DocumentSection `json:"sections" jsonschema:"required,description=Array of document sections"`
+	TotalWords int               `json:"total_words" jsonschema:"required,description=Target total number of words for the article"`
+	Keywords   []string          `json:"keywords" jsonschema:"required,description=Principal keywords illustrating the article"`
 }
 
 // SectionContent represents completed content for a section
 type SectionContent struct {
-	SectionID   string    `json:"section_id"`
-	Title       string    `json:"title"`
-	Content     string    `json:"content"`
-	Sources     []string  `json:"sources"`
-	WordCount   int       `json:"word_count"`
-	WrittenBy   string    `json:"written_by"`
-	CompletedAt time.Time `json:"completed_at"`
+	SectionID string `json:"section_id"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	WordCount int    `json:"word_count"`
 }
 
-// ArticleDocument represents the final complete article
-type ArticleDocument struct {
-	Title       string           `json:"title"`
-	Summary     string           `json:"summary"`
-	Content     string           `json:"content"`
-	Sections    []SectionContent `json:"sections"`
-	Sources     []string         `json:"sources"`
-	WordCount   int              `json:"word_count"`
-	Keywords    []string         `json:"keywords"`
-	CreatedAt   time.Time        `json:"created_at"`
-	CompletedAt time.Time        `json:"completed_at"`
+// Document represents the final complete article
+type Document struct {
+	DocumentMetadata
+	Summary  string           `json:"summary"`
+	Content  string           `json:"content"`
+	Sections []SectionContent `json:"sections"`
+}
+
+type DocumentMetadata struct {
+	Title     string   `json:"title"`
+	WordCount int      `json:"word_count"`
+	Keywords  []string `json:"keywords"`
+	Sources   []Source `json:"sources"`
+}
+
+type Source struct {
+	ID         string   `json:"id"`
+	URL        string   `json:"url"`
+	Title      string   `json:"title"`
+	Keywords   []string `json:"keywords"`
+	SourceType string   `json:"source_type"` // "web", "article", "academic", "news"
+	Relevance  float64  `json:"relevance"`
 }
 
 // DocumentPlanEvent carries the article plan from planner to orchestrator
@@ -256,14 +261,14 @@ func NewSectionContentEvent(ctx context.Context, content SectionContent, origin 
 // FinalArticleEvent carries the completed, edited article
 type FinalArticleEvent interface {
 	agent.MessageEvent
-	Article() ArticleDocument
+	Article() Document
 	Origin() agent.Event
 }
 
 type BaseFinalArticleEvent struct {
 	id      agent.EventID
 	ctx     context.Context
-	article ArticleDocument
+	article Document
 	origin  agent.Event
 }
 
@@ -292,9 +297,11 @@ type ProgressPhase string
 
 const (
 	PhaseInitializing ProgressPhase = "initializing"
+	PhaseResearching  ProgressPhase = "researching" // NEW
 	PhasePlanning     ProgressPhase = "planning"
 	PhaseWriting      ProgressPhase = "writing"
 	PhaseEditing      ProgressPhase = "editing"
+	PhaseAttributing  ProgressPhase = "attributing" // NEW
 	PhaseCompleted    ProgressPhase = "completed"
 )
 
@@ -400,7 +407,7 @@ func (e *BaseFinalArticleEvent) Message() string {
 }
 
 // Article implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) Article() ArticleDocument {
+func (e *BaseFinalArticleEvent) Article() Document {
 	return e.article
 }
 
@@ -412,7 +419,7 @@ func (e *BaseFinalArticleEvent) Origin() agent.Event {
 var _ FinalArticleEvent = &BaseFinalArticleEvent{}
 
 // NewFinalArticleEvent creates a new final article event
-func NewFinalArticleEvent(ctx context.Context, article ArticleDocument, origin agent.Event) *BaseFinalArticleEvent {
+func NewFinalArticleEvent(ctx context.Context, article Document, origin agent.Event) *BaseFinalArticleEvent {
 	return &BaseFinalArticleEvent{
 		id:      agent.NewEventID(),
 		ctx:     ctx,

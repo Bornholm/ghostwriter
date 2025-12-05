@@ -1,6 +1,6 @@
 # Ghostwriter
 
-A little tool to generate sourced article about any subject with LLMs
+A little tool to generate sourced articles about any subject with LLMs
 
 ## Usage
 
@@ -16,5 +16,5 @@ A little tool to generate sourced article about any subject with LLMs
 2. Generate your document:
 
    ```bash
-   go run ./cmd/ghostwriter -subject "What are the latest news about 3I/ATLAS ?"
+   go run ./cmd/ghostwriter write --subject "What are the latest news about 3I/ATLAS ?"
    ```

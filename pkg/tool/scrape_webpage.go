@@ -2,7 +2,6 @@ package tool
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
@@ -27,8 +26,6 @@ func NewScrapeWebpageTool(scraper scraper.Scraper) llm.Tool {
 				return "", errors.WithStack(err)
 			}
 
-			slog.DebugContext(ctx, "scraping page", slog.String("url", url))
-
 			res, err := scraper.Get(ctx, url)
 			if err != nil {
 				return "", errors.WithStack(err)
@@ -41,6 +38,11 @@ func NewScrapeWebpageTool(scraper scraper.Scraper) llm.Tool {
 				return "", errors.WithStack(err)
 			}
 
+			html, err := doc.Find("body").Html()
+			if err != nil {
+				return "", errors.WithStack(err)
+			}
+
 			conv := converter.NewConverter(
 				converter.WithPlugins(
 					base.NewBasePlugin(),
@@ -48,11 +50,6 @@ func NewScrapeWebpageTool(scraper scraper.Scraper) llm.Tool {
 					table.NewTablePlugin(),
 				),
 			)
-
-			html, err := doc.Find("body").Html()
-			if err != nil {
-				return "", errors.WithStack(err)
-			}
 
 			markdown, err := conv.ConvertString(html)
 			if err != nil {

@@ -5,9 +5,9 @@ import (
 	"embed"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/bornholm/genai/agent"
+	"github.com/bornholm/genai/agent/task"
 	"github.com/bornholm/genai/llm"
 	"github.com/bornholm/genai/llm/prompt"
 	"github.com/pkg/errors"
@@ -18,8 +18,7 @@ var editorPrompts embed.FS
 
 // EditorHandler handles article editing and finalization
 type EditorHandler struct {
-	client          llm.ChatCompletionClient
-	sourceExtractor *SourceExtractor
+	client llm.ChatCompletionClient
 }
 
 // EditRequest represents a request to edit an article
@@ -83,7 +82,7 @@ func (h *EditorHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 		return errors.New("editor handler can only process editor role events")
 	}
 
-	// Edit and finalize the article
+	// Edit and finalize the article using knowledge base
 	article, err := h.editArticle(ctx, editRequest)
 	if err != nil {
 		return errors.WithStack(err)
@@ -96,89 +95,106 @@ func (h *EditorHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 	return nil
 }
 
-// editArticle processes and enhances the complete article
-func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEvent) (ArticleDocument, error) {
+// editArticle processes and enhances the complete article using knowledge base
+func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEvent) (Document, error) {
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
 
+	// Get knowledge base from context
+	kb, hasKB := ContextKnowledgeBase(ctx)
+	if !hasKB {
+		return Document{}, errors.New("knowledge base not available in context")
+	}
+
 	// Emit progress for editing initialization
-	tracker.EmitSubProgress(PhaseEditing, "Initializing article editing process",
+	tracker.EmitSubProgress(PhaseEditing, "Initializing article editing with knowledge base access",
 		GetPhaseBaseProgress(PhaseEditing), 0.1, EditingWeight, map[string]interface{}{
 			"step":           "initialization",
 			"sections_count": len(request.Sections),
 			"title":          request.Title,
 		})
 
-	// Load the editor system prompt
+	// Load the editor system prompt (updated version)
 	systemPrompt, err := prompt.FromFS[any](&editorPrompts, "prompts/editor_system.gotmpl", nil)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
+	}
+
+	// Create knowledge-based editing tools
+	knowledgeTools := []llm.Tool{
+		NewSearchKnowledgeBaseTool(kb),
 	}
 
 	// Emit progress for prompt creation
-	tracker.EmitSubProgress(PhaseEditing, "Preparing editing instructions and content review",
+	tracker.EmitSubProgress(PhaseEditing, "Preparing editing instructions",
 		GetPhaseBaseProgress(PhaseEditing), 0.2, EditingWeight, map[string]interface{}{
 			"step": "prompt_creation",
 		})
 
-	// Create the editing prompt with all sections
+	// Create the knowledge-enhanced editing prompt
 	styleGuidelines := ContextStyleGuidelines(ctx, "")
 	additionalContext := ContextAdditionalContext(ctx, "")
-	userPrompt := h.createEditingPrompt(request, styleGuidelines, additionalContext)
-
-	messages := []llm.Message{
-		llm.NewMessage(llm.RoleSystem, systemPrompt),
-		llm.NewMessage(llm.RoleUser, userPrompt),
-	}
-
-	// Get client from context or use default
-	client := agent.ContextClient(ctx, h.client)
-	temperature := agent.ContextTemperature(ctx, 0.2) // Lower temperature for editing
+	userPrompt := h.createEditingPrompt(request, kb, styleGuidelines, additionalContext)
 
 	// Emit progress for editing execution
-	tracker.EmitSubProgress(PhaseEditing, "Reviewing content flow and enhancing article structure",
+	tracker.EmitSubProgress(PhaseEditing, "Enhancing content using knowledge base insights",
 		GetPhaseBaseProgress(PhaseEditing), 0.4, EditingWeight, map[string]interface{}{
 			"step": "editing_execution",
 		})
 
-	// Make the LLM call
-	response, err := client.ChatCompletion(ctx,
-		llm.WithMessages(messages...),
-		llm.WithTemperature(temperature),
-	)
+	// Set up task context for knowledge-enhanced editing
+	taskCtx := task.WithContextMinIterations(ctx, 1)
+	taskCtx = task.WithContextMaxIterations(taskCtx, 3)
+	taskCtx = task.WithContextMaxToolIterations(taskCtx, 6)
+	taskCtx = agent.WithContextMessages(taskCtx, []llm.Message{
+		llm.NewMessage(llm.RoleSystem, systemPrompt),
+	})
+	taskCtx = agent.WithContextTools(taskCtx, knowledgeTools)
+
+	// Create task handler
+	taskHandler := task.NewHandler(h.client, task.WithDefaultTools(knowledgeTools...))
+	editorAgent := agent.New(taskHandler)
+
+	// Start the agent
+	if _, _, err := editorAgent.Start(taskCtx); err != nil {
+		return Document{}, errors.WithStack(err)
+	}
+	defer editorAgent.Stop()
+
+	// Execute editing task
+	result, err := task.Do(taskCtx, editorAgent, userPrompt)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 
 	// Emit progress for content processing
-	tracker.EmitSubProgress(PhaseEditing, "Processing edited content and consolidating sources",
+	tracker.EmitSubProgress(PhaseEditing, "Processing enhanced content and consolidating sources",
 		GetPhaseBaseProgress(PhaseEditing), 0.7, EditingWeight, map[string]interface{}{
 			"step": "content_processing",
 		})
 
 	// Parse the edited article using the shared utility
-	article, err := h.parseEditedArticle(ctx, response.Message().Content(), request)
+	article, err := h.parseEditedArticle(ctx, result.Result(), request)
 	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
+		return Document{}, errors.WithStack(err)
 	}
 
 	// Emit progress for editing completion
-	tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Article editing completed: %d words, %d sources", article.WordCount, len(article.Sources)),
+	tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Article editing completed: %d words", article.WordCount),
 		GetPhaseBaseProgress(PhaseEditing), 1.0, EditingWeight, map[string]interface{}{
-			"step":          "editing_complete",
-			"final_title":   article.Title,
-			"word_count":    article.WordCount,
-			"sources_count": len(article.Sources),
+			"step":        "editing_complete",
+			"final_title": article.Title,
+			"word_count":  article.WordCount,
 		})
 
 	return article, nil
 }
 
-// createEditingPrompt creates the user prompt for editing
-func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, styleGuidelines string, additionalContext string) string {
+// createEditingPrompt creates the knowledge-enhanced editing prompt
+func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, kb *KnowledgeBase, styleGuidelines string, additionalContext string) string {
 	var prompt strings.Builder
 
-	prompt.WriteString("Please edit and finalize the following article:\n\n")
+	prompt.WriteString("Edit and enhance the following article using the research knowledge base for additional insights and improvements.\n\n")
 	prompt.WriteString("**Article Subject:** ")
 	prompt.WriteString(request.Subject)
 	prompt.WriteString("\n")
@@ -186,40 +202,45 @@ func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, styleGuid
 	prompt.WriteString(request.Title)
 	prompt.WriteString("\n\n")
 
-	prompt.WriteString("**Original Plan Summary:**\n")
-	prompt.WriteString(request.Plan.Summary)
-	prompt.WriteString("\n\n")
-
-	prompt.WriteString("**Section Content to Edit:**\n\n")
-
-	// Add each section
-	for i, section := range request.Sections {
-		prompt.WriteString(fmt.Sprintf("### Section %d: %s\n\n", i+1, section.Title))
-		prompt.WriteString(section.Content)
-		prompt.WriteString("\n\n")
-
-		if len(section.Sources) > 0 {
-			prompt.WriteString("**Section Sources:**\n")
-			for _, source := range section.Sources {
-				prompt.WriteString("- ")
-				prompt.WriteString(source)
-				prompt.WriteString("\n")
-			}
-			prompt.WriteString("\n")
+	// Get research overview from knowledge base
+	stats := kb.GetStats()
+	prompt.WriteString("**Available Research Context:**\n")
+	prompt.WriteString(fmt.Sprintf("- Total research documents: %d\n", stats["total_documents"]))
+	if sourceTypeCounts, ok := stats["source_type_counts"].(map[string]int); ok {
+		prompt.WriteString("- Source types available:\n")
+		for sourceType, count := range sourceTypeCounts {
+			prompt.WriteString(fmt.Sprintf("  - %s: %d documents\n", sourceType, count))
 		}
 	}
+	prompt.WriteString("\n")
 
-	prompt.WriteString("**Editing Instructions:**\n")
+	prompt.WriteString("**Planned sections:**\n")
+	for i, s := range request.Plan.Sections {
+		if i > 0 {
+			prompt.WriteString("\n")
+		}
+
+		prompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, s.Title))
+		prompt.WriteString(fmt.Sprintf("		- **Description:** %s\n", s.Description))
+		prompt.WriteString(fmt.Sprintf("		- **Target words:** %d", s.WordCount))
+	}
+
+	prompt.WriteString("**Available Knowledge Base Tools:**\n")
+	prompt.WriteString("- `search_knowledge_base`: Search for specific topics or facts\n")
+
+	prompt.WriteString("**Enhanced Editing Instructions:**\n")
 	prompt.WriteString("1. Review the entire article for consistency and flow\n")
-	prompt.WriteString("2. Create smooth transitions between sections\n")
-	prompt.WriteString("3. Enhance the introduction and conclusion\n")
-	prompt.WriteString("4. Ensure consistent tone and style throughout\n")
-	prompt.WriteString("5. Consolidate and properly format all sources\n")
-	prompt.WriteString("6. Optimize for readability and engagement\n")
-	prompt.WriteString("7. Maintain all factual content and research\n")
+	prompt.WriteString("2. Use knowledge base tools to find additional supporting information\n")
+	prompt.WriteString("3. Enhance content with relevant facts, examples, or insights from research\n")
+	prompt.WriteString("4. Create smooth transitions between sections\n")
+	prompt.WriteString("5. Strengthen the introduction and conclusion with research insights\n")
+	prompt.WriteString("6. Ensure consistent tone and style throughout\n")
+	prompt.WriteString("7. Add any missing important information found in the knowledge base\n")
+	prompt.WriteString("8. Optimize for readability and engagement\n")
+	prompt.WriteString("9. Maintain all factual content and research accuracy\n")
 
 	if styleGuidelines != "" {
-		prompt.WriteString("8. Apply and enforce the provided style guidelines throughout the article\n\n")
+		prompt.WriteString("11. Apply and enforce the provided style guidelines throughout the article\n\n")
 		prompt.WriteString("**Style Guidelines to Apply:**\n")
 		prompt.WriteString("```\n")
 		prompt.WriteString(styleGuidelines)
@@ -237,60 +258,39 @@ func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, styleGuid
 		prompt.WriteString("Please consider this additional context when editing and incorporate relevant information as appropriate.\n\n")
 	}
 
-	prompt.WriteString("Please provide the complete, edited article in the specified format.")
+	prompt.WriteString("Start by querying the knowledge base for any additional insights that could enhance the article, then provide the complete, edited article in the specified format.")
+
+	prompt.WriteString("\n\n---\n\n")
+
+	prompt.WriteString("**Section Content to Edit:**\n\n")
+
+	// Add each section
+	for _, section := range request.Sections {
+		prompt.WriteString(fmt.Sprintf("## %s\n\n", section.Title))
+		prompt.WriteString(section.Content)
+		prompt.WriteString("\n\n")
+	}
 
 	return prompt.String()
 }
 
 // parseEditedArticle extracts the final article from the editor response
-func (h *EditorHandler) parseEditedArticle(ctx context.Context, response string, request *EditRequestEvent) (ArticleDocument, error) {
-	// First, try to extract content and sources using the shared utility
-	content, sources, err := h.sourceExtractor.ExtractContentAndSources(ctx, response)
-	if err != nil {
-		return ArticleDocument{}, errors.WithStack(err)
-	}
-
-	// If no sources were found in the LLM response, consolidate from individual sections
-	if len(sources) == 0 {
-		var sectionSources [][]string
-		for _, section := range request.Sections {
-			if len(section.Sources) > 0 {
-				sectionSources = append(sectionSources, section.Sources)
-			}
-		}
-
-		if len(sectionSources) > 0 {
-			consolidatedSources, err := h.sourceExtractor.ConsolidateSources(ctx, sectionSources)
-			if err != nil {
-				return ArticleDocument{}, errors.WithStack(err)
-			}
-			sources = consolidatedSources
-		}
-	}
-
+func (h *EditorHandler) parseEditedArticle(ctx context.Context, response string, request *EditRequestEvent) (Document, error) {
 	// Extract title from the content
-	title := h.extractTitle(content, request.Title)
-
-	// Add sources section to content if sources exist
-	if len(sources) > 0 {
-		sourcesSection := h.sourceExtractor.FormatSourcesSection(sources)
-		content = content + sourcesSection
-	}
+	title := h.extractTitle(response, request.Title)
 
 	// Calculate word count
-	wordCount := h.countWords(content)
+	wordCount := h.countWords(response)
 
 	// Create the final article document
-	article := ArticleDocument{
-		Title:       title,
-		Summary:     request.Plan.Summary,
-		Content:     content,
-		Sections:    request.Sections, // Keep original sections for reference
-		Sources:     sources,
-		WordCount:   wordCount,
-		Keywords:    request.Plan.Keywords,
-		CreatedAt:   request.Plan.CreatedAt,
-		CompletedAt: time.Now(),
+	article := Document{
+		DocumentMetadata: DocumentMetadata{
+			Title:     title,
+			WordCount: wordCount,
+			Keywords:  request.Plan.Keywords,
+		},
+		Content:  response,
+		Sections: request.Sections, // Keep original sections for reference
 	}
 
 	return article, nil
@@ -323,8 +323,7 @@ func (h *EditorHandler) countWords(text string) int {
 // NewEditorHandler creates a new editor handler
 func NewEditorHandler(client llm.ChatCompletionClient) *EditorHandler {
 	return &EditorHandler{
-		client:          client,
-		sourceExtractor: NewSourceExtractor(client),
+		client: client,
 	}
 }
 

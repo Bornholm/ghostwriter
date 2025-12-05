@@ -3,7 +3,6 @@ package tool
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/bornholm/genai/llm"
@@ -22,8 +21,6 @@ func NewWebSearchTool(client search.Client) llm.Tool {
 			if err != nil {
 				return "", errors.WithStack(err)
 			}
-
-			slog.DebugContext(ctx, "executing a web search", slog.String("topic", topic))
 
 			results, err := client.Search(ctx, topic)
 			if err != nil {

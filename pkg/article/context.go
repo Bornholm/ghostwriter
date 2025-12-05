@@ -15,12 +15,16 @@ const (
 	ContextKeyAgentRole         agent.ContextKey = "article_agent_role"
 	ContextKeyStyleGuidelines   agent.ContextKey = "article_style_guidelines"
 	ContextKeyAdditionalContext agent.ContextKey = "article_additional_context"
+	ContextKeyKnowledgeBase     agent.ContextKey = "article_knowledge_base"     // NEW
+	ContextKeyResearchComplete  agent.ContextKey = "article_research_complete"  // NEW
+	ContextKeySourceAttribution agent.ContextKey = "article_source_attribution" // NEW
 )
 
 // AgentRole defines the role of an agent in the article writing process
 type AgentRole string
 
 const (
+	RoleResearcher   AgentRole = "researcher" // NEW
 	RolePlanner      AgentRole = "planner"
 	RoleWriter       AgentRole = "writer"
 	RoleEditor       AgentRole = "editor"
@@ -116,4 +120,26 @@ func WithContextAdditionalContext(ctx context.Context, additionalContext string)
 // ContextAdditionalContext retrieves the additional context information from context
 func ContextAdditionalContext(ctx context.Context, defaultContext string) string {
 	return agent.ContextValue(ctx, ContextKeyAdditionalContext, defaultContext)
+}
+
+// WithContextKnowledgeBase adds knowledge base to context
+func WithContextKnowledgeBase(ctx context.Context, kb *KnowledgeBase) context.Context {
+	return context.WithValue(ctx, ContextKeyKnowledgeBase, kb)
+}
+
+// ContextKnowledgeBase retrieves knowledge base from context
+func ContextKnowledgeBase(ctx context.Context) (*KnowledgeBase, bool) {
+	kb, ok := ctx.Value(ContextKeyKnowledgeBase).(*KnowledgeBase)
+	return kb, ok
+}
+
+// WithContextResearchComplete marks research as complete in context
+func WithContextResearchComplete(ctx context.Context, complete bool) context.Context {
+	return context.WithValue(ctx, ContextKeyResearchComplete, complete)
+}
+
+// ContextResearchComplete checks if research is complete from context
+func ContextResearchComplete(ctx context.Context) bool {
+	complete, ok := ctx.Value(ContextKeyResearchComplete).(bool)
+	return ok && complete
 }
