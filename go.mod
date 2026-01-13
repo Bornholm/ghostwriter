@@ -8,7 +8,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/abadojack/whatlanggo v1.0.1
 	github.com/blevesearch/bleve/v2 v2.5.5
-	github.com/bornholm/genai v0.0.2
+	github.com/bornholm/genai v0.0.3
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/davecgh/go-spew v1.1.1
@@ -137,4 +137,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/bornholm/genai => ../genai
+// replace github.com/bornholm/genai => ../genai
