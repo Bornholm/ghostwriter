@@ -46,8 +46,8 @@ func (s *Scraper) getClient() *surf.Client {
 	}
 
 	builder = builder.Impersonate().RandomOS().Chrome().
-		Timeout(30*time.Second).
-		Retry(5, 5).
+		Timeout(20*time.Second).
+		Retry(3, 2).
 		Session()
 
 	return builder.Build()

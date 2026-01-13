@@ -19,6 +19,7 @@ var editorPrompts embed.FS
 // EditorHandler handles article editing and finalization
 type EditorHandler struct {
 	client llm.ChatCompletionClient
+	tools  []llm.Tool
 }
 
 // EditRequest represents a request to edit an article
@@ -95,92 +96,88 @@ func (h *EditorHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 	return nil
 }
 
-// editArticle processes and enhances the complete article using knowledge base
+// editArticle processes and enhances the complete article using section-by-section editing
 func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEvent) (Document, error) {
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
 
-	// Get knowledge base from context
-	kb, hasKB := ContextKnowledgeBase(ctx)
-	if !hasKB {
-		return Document{}, errors.New("knowledge base not available in context")
-	}
-
 	// Emit progress for editing initialization
-	tracker.EmitSubProgress(PhaseEditing, "Initializing article editing with knowledge base access",
+	tracker.EmitSubProgress(PhaseEditing, "Initializing section-by-section editing with knowledge base access",
 		GetPhaseBaseProgress(PhaseEditing), 0.1, EditingWeight, map[string]interface{}{
 			"step":           "initialization",
 			"sections_count": len(request.Sections),
 			"title":          request.Title,
 		})
 
-	// Load the editor system prompt (updated version)
-	systemPrompt, err := prompt.FromFS[any](&editorPrompts, "prompts/editor_system.gotmpl", nil)
-	if err != nil {
-		return Document{}, errors.WithStack(err)
+	// Get target word count from context
+	targetWordCount := ContextTargetWordCount(ctx, request.Plan.TotalWords)
+
+	// Calculate current word count from sections
+	currentWordCount := 0
+	for _, section := range request.Sections {
+		currentWordCount += h.countWords(section.Content)
 	}
 
-	// Create knowledge-based editing tools
-	knowledgeTools := []llm.Tool{
-		NewSearchKnowledgeBaseTool(kb),
-	}
-
-	// Emit progress for prompt creation
-	tracker.EmitSubProgress(PhaseEditing, "Preparing editing instructions",
+	tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Processing %d sections individually to preserve context window", len(request.Sections)),
 		GetPhaseBaseProgress(PhaseEditing), 0.2, EditingWeight, map[string]interface{}{
-			"step": "prompt_creation",
+			"step":               "section_processing_start",
+			"current_word_count": currentWordCount,
+			"target_word_count":  targetWordCount,
 		})
 
-	// Create the knowledge-enhanced editing prompt
-	styleGuidelines := ContextStyleGuidelines(ctx, "")
-	additionalContext := ContextAdditionalContext(ctx, "")
-	userPrompt := h.createEditingPrompt(request, kb, styleGuidelines, additionalContext)
+	// Process each section individually
+	editedSections := make([]SectionContent, len(request.Sections))
+	totalEditedWords := 0
 
-	// Emit progress for editing execution
-	tracker.EmitSubProgress(PhaseEditing, "Enhancing content using knowledge base insights",
-		GetPhaseBaseProgress(PhaseEditing), 0.4, EditingWeight, map[string]interface{}{
-			"step": "editing_execution",
-		})
+	for i, section := range request.Sections {
+		sectionProgress := 0.2 + (0.6 * float64(i) / float64(len(request.Sections)))
 
-	// Set up task context for knowledge-enhanced editing
-	taskCtx := task.WithContextMinIterations(ctx, 1)
-	taskCtx = task.WithContextMaxIterations(taskCtx, 3)
-	taskCtx = task.WithContextMaxToolIterations(taskCtx, 6)
-	taskCtx = agent.WithContextMessages(taskCtx, []llm.Message{
-		llm.NewMessage(llm.RoleSystem, systemPrompt),
-	})
-	taskCtx = agent.WithContextTools(taskCtx, knowledgeTools)
+		tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Editing section %d/%d: %s", i+1, len(request.Sections), section.Title),
+			GetPhaseBaseProgress(PhaseEditing), sectionProgress, EditingWeight, map[string]interface{}{
+				"step":          "section_editing",
+				"section_index": i,
+				"section_title": section.Title,
+			})
 
-	// Create task handler
-	taskHandler := task.NewHandler(h.client, task.WithDefaultTools(knowledgeTools...))
-	editorAgent := agent.New(taskHandler)
+		// Find the corresponding planned section for target word count
+		var plannedSection *DocumentSection
+		for _, ps := range request.Plan.Sections {
+			if ps.Title == section.Title {
+				plannedSection = ps
+				break
+			}
+		}
 
-	// Start the agent
-	if _, _, err := editorAgent.Start(taskCtx); err != nil {
-		return Document{}, errors.WithStack(err)
+		// Get previous section for transition context
+		var previousSection *SectionContent
+		if i > 0 {
+			previousSection = &editedSections[i-1]
+		}
+
+		editedSection, err := h.editSectionIndependently(ctx, section, plannedSection, request.Subject, targetWordCount, currentWordCount, previousSection)
+		if err != nil {
+			return Document{}, errors.WithStack(err)
+		}
+
+		editedSections[i] = editedSection
+		totalEditedWords += editedSection.WordCount
 	}
-	defer editorAgent.Stop()
 
-	// Execute editing task
-	result, err := task.Do(taskCtx, editorAgent, userPrompt)
-	if err != nil {
-		return Document{}, errors.WithStack(err)
-	}
-
-	// Emit progress for content processing
-	tracker.EmitSubProgress(PhaseEditing, "Processing enhanced content and consolidating sources",
-		GetPhaseBaseProgress(PhaseEditing), 0.7, EditingWeight, map[string]interface{}{
-			"step": "content_processing",
+	// Emit progress for content assembly
+	tracker.EmitSubProgress(PhaseEditing, "Assembling edited sections into final article",
+		GetPhaseBaseProgress(PhaseEditing), 0.8, EditingWeight, map[string]interface{}{
+			"step":               "content_assembly",
+			"total_edited_words": totalEditedWords,
 		})
 
-	// Parse the edited article using the shared utility
-	article, err := h.parseEditedArticle(ctx, result.Result(), request)
+	// Combine sections into final article
+	article, err := h.assembleFinalArticle(ctx, request, editedSections)
 	if err != nil {
 		return Document{}, errors.WithStack(err)
 	}
 
 	// Emit progress for editing completion
-	tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Article editing completed: %d words", article.WordCount),
+	tracker.EmitSubProgress(PhaseEditing, fmt.Sprintf("Section-by-section editing completed: %d words", article.WordCount),
 		GetPhaseBaseProgress(PhaseEditing), 1.0, EditingWeight, map[string]interface{}{
 			"step":        "editing_complete",
 			"final_title": article.Title,
@@ -190,125 +187,182 @@ func (h *EditorHandler) editArticle(ctx context.Context, request *EditRequestEve
 	return article, nil
 }
 
-// createEditingPrompt creates the knowledge-enhanced editing prompt
-func (h *EditorHandler) createEditingPrompt(request *EditRequestEvent, kb *KnowledgeBase, styleGuidelines string, additionalContext string) string {
-	var prompt strings.Builder
-
-	prompt.WriteString("Edit and enhance the following article using the research knowledge base for additional insights and improvements.\n\n")
-	prompt.WriteString("**Article Subject:** ")
-	prompt.WriteString(request.Subject)
-	prompt.WriteString("\n")
-	prompt.WriteString("**Planned Title:** ")
-	prompt.WriteString(request.Title)
-	prompt.WriteString("\n\n")
-
-	// Get research overview from knowledge base
-	stats := kb.GetStats()
-	prompt.WriteString("**Available Research Context:**\n")
-	prompt.WriteString(fmt.Sprintf("- Total research documents: %d\n", stats["total_documents"]))
-	if sourceTypeCounts, ok := stats["source_type_counts"].(map[string]int); ok {
-		prompt.WriteString("- Source types available:\n")
-		for sourceType, count := range sourceTypeCounts {
-			prompt.WriteString(fmt.Sprintf("  - %s: %d documents\n", sourceType, count))
-		}
-	}
-	prompt.WriteString("\n")
-
-	prompt.WriteString("**Planned sections:**\n")
-	for i, s := range request.Plan.Sections {
-		if i > 0 {
-			prompt.WriteString("\n")
-		}
-
-		prompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, s.Title))
-		prompt.WriteString(fmt.Sprintf("		- **Description:** %s\n", s.Description))
-		prompt.WriteString(fmt.Sprintf("		- **Target words:** %d", s.WordCount))
+// editSectionIndependently edits a single section with focused context
+func (h *EditorHandler) editSectionIndependently(ctx context.Context, section SectionContent, plannedSection *DocumentSection, subject string, totalTargetWords int, totalCurrentWords int, previousSection *SectionContent) (SectionContent, error) {
+	// Load the editor system prompt
+	systemPrompt, err := prompt.FromFS[any](&editorPrompts, "prompts/editor_system.gotmpl", nil)
+	if err != nil {
+		return SectionContent{}, errors.WithStack(err)
 	}
 
-	prompt.WriteString("**Available Knowledge Base Tools:**\n")
-	prompt.WriteString("- `search_knowledge_base`: Search for specific topics or facts\n")
-
-	prompt.WriteString("**Enhanced Editing Instructions:**\n")
-	prompt.WriteString("1. Review the entire article for consistency and flow\n")
-	prompt.WriteString("2. Use knowledge base tools to find additional supporting information\n")
-	prompt.WriteString("3. Enhance content with relevant facts, examples, or insights from research\n")
-	prompt.WriteString("4. Create smooth transitions between sections\n")
-	prompt.WriteString("5. Strengthen the introduction and conclusion with research insights\n")
-	prompt.WriteString("6. Ensure consistent tone and style throughout\n")
-	prompt.WriteString("7. Add any missing important information found in the knowledge base\n")
-	prompt.WriteString("8. Optimize for readability and engagement\n")
-	prompt.WriteString("9. Maintain all factual content and research accuracy\n")
-
-	if styleGuidelines != "" {
-		prompt.WriteString("11. Apply and enforce the provided style guidelines throughout the article\n\n")
-		prompt.WriteString("**Style Guidelines to Apply:**\n")
-		prompt.WriteString("```\n")
-		prompt.WriteString(styleGuidelines)
-		prompt.WriteString("\n```\n\n")
-		prompt.WriteString("Ensure the final article consistently follows these style preferences in formatting, tone, structure, and presentation.\n\n")
-	} else {
-		prompt.WriteString("\n")
+	// Calculate section target word count
+	sectionTargetWords := section.WordCount // Default to current
+	if plannedSection != nil {
+		sectionTargetWords = plannedSection.WordCount
 	}
 
-	if additionalContext != "" {
-		prompt.WriteString("**Additional Context:**\n")
-		prompt.WriteString("```\n")
-		prompt.WriteString(additionalContext)
-		prompt.WriteString("\n```\n\n")
-		prompt.WriteString("Please consider this additional context when editing and incorporate relevant information as appropriate.\n\n")
+	// Create section-specific editing prompt
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	additionalContext := ContextAdditionalContext(ctx, "")
+	userPrompt := h.createSectionEditingPrompt(section, plannedSection, subject, sectionTargetWords, totalTargetWords, totalCurrentWords, styleGuidelines, additionalContext, previousSection)
+
+	// Set up task context for section editing
+	taskCtx := task.WithContextMinIterations(ctx, 1)
+	taskCtx = task.WithContextMaxIterations(taskCtx, 3) // Fewer iterations for individual sections
+	taskCtx = task.WithContextMaxToolIterations(taskCtx, 4)
+	taskCtx = agent.WithContextMessages(taskCtx, []llm.Message{
+		llm.NewMessage(llm.RoleSystem, systemPrompt),
+		llm.NewMessage(llm.RoleUser, userPrompt),
+	})
+
+	// Create task handler
+	taskHandler := task.NewHandler(h.client)
+	editorAgent := agent.New(taskHandler)
+
+	// Start the agent
+	if _, _, err := editorAgent.Start(taskCtx); err != nil {
+		return SectionContent{}, errors.WithStack(err)
+	}
+	defer editorAgent.Stop()
+
+	// Execute section editing task
+	result, err := task.Do(taskCtx, editorAgent, userPrompt)
+	if err != nil {
+		return SectionContent{}, errors.WithStack(err)
 	}
 
-	prompt.WriteString("Start by querying the knowledge base for any additional insights that could enhance the article, then provide the complete, edited article in the specified format.")
+	// Parse the edited section content
+	editedContent := strings.TrimSpace(result.Result())
+	wordCount := h.countWords(editedContent)
 
-	prompt.WriteString("\n\n---\n\n")
-
-	prompt.WriteString("**Section Content to Edit:**\n\n")
-
-	// Add each section
-	for _, section := range request.Sections {
-		prompt.WriteString(fmt.Sprintf("## %s\n\n", section.Title))
-		prompt.WriteString(section.Content)
-		prompt.WriteString("\n\n")
-	}
-
-	return prompt.String()
+	return SectionContent{
+		Title:     section.Title,
+		Content:   editedContent,
+		WordCount: wordCount,
+	}, nil
 }
 
-// parseEditedArticle extracts the final article from the editor response
-func (h *EditorHandler) parseEditedArticle(ctx context.Context, response string, request *EditRequestEvent) (Document, error) {
-	// Extract title from the content
-	title := h.extractTitle(response, request.Title)
+// assembleFinalArticle combines edited sections into the final document
+func (h *EditorHandler) assembleFinalArticle(ctx context.Context, request *EditRequestEvent, editedSections []SectionContent) (Document, error) {
+	var content strings.Builder
 
-	// Calculate word count
-	wordCount := h.countWords(response)
+	// Add title
+	content.WriteString(fmt.Sprintf("# %s\n\n", request.Title))
+
+	// Add each edited section
+	totalWords := 0
+	for _, section := range editedSections {
+		content.WriteString(fmt.Sprintf("## %s\n\n", section.Title))
+		content.WriteString(section.Content)
+		content.WriteString("\n\n")
+		totalWords += section.WordCount
+	}
 
 	// Create the final article document
 	article := Document{
 		DocumentMetadata: DocumentMetadata{
-			Title:     title,
-			WordCount: wordCount,
+			Title:     request.Title,
+			WordCount: totalWords,
 			Keywords:  request.Plan.Keywords,
 		},
-		Content:  response,
-		Sections: request.Sections, // Keep original sections for reference
+		Content:  content.String(),
+		Sections: editedSections,
 	}
 
 	return article, nil
 }
 
-// extractTitle extracts the article title from the content
-func (h *EditorHandler) extractTitle(content, fallbackTitle string) string {
-	lines := strings.Split(content, "\n")
+// createSectionEditingPrompt creates a focused prompt for individual section editing
+func (h *EditorHandler) createSectionEditingPrompt(section SectionContent, plannedSection *DocumentSection, subject string, sectionTargetWords int, totalTargetWords int, totalCurrentWords int, styleGuidelines string, additionalContext string, previousSection *SectionContent) string {
+	var prompt strings.Builder
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		// Look for markdown title
-		if strings.HasPrefix(line, "# ") {
-			return strings.TrimSpace(line[2:])
+	prompt.WriteString("Edit and enhance this individual section of an article.\n\n")
+	prompt.WriteString("**Article Subject:** ")
+	prompt.WriteString(subject)
+	prompt.WriteString("\n\n")
+
+	prompt.WriteString("**Section Information:**\n")
+	prompt.WriteString(fmt.Sprintf("- **Section Title:** %s\n", section.Title))
+	prompt.WriteString(fmt.Sprintf("- **Current word count:** %d words\n", section.WordCount))
+	prompt.WriteString(fmt.Sprintf("- **Target word count:** %d words\n", sectionTargetWords))
+
+	if plannedSection != nil && len(plannedSection.KeyPoints) > 0 {
+		prompt.WriteString("- **Key points to cover:**\n")
+		for _, point := range plannedSection.KeyPoints {
+			prompt.WriteString(fmt.Sprintf("  - %s\n", point))
 		}
 	}
 
-	return fallbackTitle
+	// Word count guidance
+	if section.WordCount < sectionTargetWords {
+		wordGap := sectionTargetWords - section.WordCount
+		prompt.WriteString(fmt.Sprintf("- **Action needed:** Expand by ~%d words with quality content\n", wordGap))
+	} else if section.WordCount > sectionTargetWords {
+		prompt.WriteString("- **Action needed:** Maintain current length, only reduce truly redundant content\n")
+	} else {
+		prompt.WriteString("- **Action needed:** Maintain current word count while improving quality\n")
+	}
+
+	prompt.WriteString("\n**Context Information:**\n")
+	prompt.WriteString(fmt.Sprintf("- **Total article target:** %d words\n", totalTargetWords))
+	prompt.WriteString(fmt.Sprintf("- **Total article current:** %d words\n", totalCurrentWords))
+	prompt.WriteString("\n")
+
+	prompt.WriteString("**Section Editing Instructions:**\n")
+	prompt.WriteString("1. Focus only on this section - do not add other sections\n")
+	prompt.WriteString("2. Enhance content quality while respecting word count targets\n")
+	prompt.WriteString("3. Use knowledge base tools to find supporting information if needed\n")
+	prompt.WriteString("4. Maintain consistent tone and style\n")
+	prompt.WriteString("5. Ensure factual accuracy and research-backed content\n")
+
+	if section.WordCount < sectionTargetWords {
+		prompt.WriteString("6. **IMPORTANT**: Expand with quality additions:\n")
+		prompt.WriteString("   - Add concrete examples and evidence\n")
+		prompt.WriteString("   - Enhance explanations with more detail\n")
+		prompt.WriteString("   - Include relevant insights from research\n")
+		prompt.WriteString("   - Only add content that genuinely improves the section\n")
+	} else {
+		prompt.WriteString("6. **IMPORTANT**: Preserve content length - avoid unnecessary reduction\n")
+	}
+
+	if styleGuidelines != "" {
+		prompt.WriteString("\n**Style Guidelines:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(styleGuidelines)
+		prompt.WriteString("\n```\n")
+	}
+
+	if additionalContext != "" {
+		prompt.WriteString("\n**Additional Context:**\n")
+		prompt.WriteString("```\n")
+		prompt.WriteString(additionalContext)
+		prompt.WriteString("\n```\n")
+	}
+
+	if previousSection != nil {
+		prompt.WriteString("\n**Previous Section for Context:**\n")
+		prompt.WriteString(fmt.Sprintf("**Title:** %s\n", previousSection.Title))
+		prompt.WriteString("**Content (last 200 words):**\n")
+		// Include last 200 words of previous section for transition context
+		prevWords := strings.Fields(previousSection.Content)
+		startIdx := len(prevWords) - 200
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		prevContext := strings.Join(prevWords[startIdx:], " ")
+		prompt.WriteString(prevContext)
+		prompt.WriteString("\n\n")
+		prompt.WriteString("**Transition Instructions:**\n")
+		prompt.WriteString("- Create a smooth transition from the previous section\n")
+		prompt.WriteString("- Ensure logical flow and connection between sections\n")
+		prompt.WriteString("- Avoid abrupt topic changes\n\n")
+	}
+
+	prompt.WriteString("**Section Content to Edit:**\n\n")
+	prompt.WriteString(section.Content)
+	prompt.WriteString("\n\nProvide only the enhanced section content (without the section title header).")
+
+	return prompt.String()
 }
 
 // countWords provides a simple word count
@@ -321,9 +375,10 @@ func (h *EditorHandler) countWords(text string) int {
 }
 
 // NewEditorHandler creates a new editor handler
-func NewEditorHandler(client llm.ChatCompletionClient) *EditorHandler {
+func NewEditorHandler(client llm.ChatCompletionClient, tools ...llm.Tool) *EditorHandler {
 	return &EditorHandler{
 		client: client,
+		tools:  tools,
 	}
 }
 

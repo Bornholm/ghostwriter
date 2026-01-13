@@ -6,14 +6,14 @@ require (
 	github.com/Davincible/chromedp-undetected v1.3.8
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.4.0
 	github.com/PuerkitoBio/goquery v1.11.0
+	github.com/abadojack/whatlanggo v1.0.1
 	github.com/blevesearch/bleve/v2 v2.5.5
-	github.com/bornholm/genai v0.0.0-20251205173312-f5bdcdfdebe7
+	github.com/bornholm/genai v0.0.2
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/davecgh/go-spew v1.1.1
 	github.com/enetx/g v1.0.195
 	github.com/enetx/surf v1.0.143
-	github.com/gobwas/glob v0.2.3
 	github.com/gocolly/colly v1.2.0
 	github.com/gosimple/slug v1.15.0
 	github.com/hashicorp/go-multierror v1.1.1
@@ -74,6 +74,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
+	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
@@ -136,4 +137,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// replace github.com/bornholm/genai => ../genai
+replace github.com/bornholm/genai => ../genai

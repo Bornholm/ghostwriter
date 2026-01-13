@@ -9,7 +9,7 @@ import (
 
 // DocumentSection represents a section in the article plan
 type DocumentSection struct {
-	ID          string   `json:"id" jsonschema:"required,description=Unique identifier for the section"`
+	ID          string   `json:"-"`
 	Title       string   `json:"title" jsonschema:"required,description=Title of the section"`
 	Description string   `json:"description" jsonschema:"required,description=Description or guidance for writing this section"`
 	KeyPoints   []string `json:"key_points" jsonschema:"required,description=Key points to cover in this section"`
@@ -18,15 +18,14 @@ type DocumentSection struct {
 
 // DocumentPlan represents the complete article structure
 type DocumentPlan struct {
-	Title      string            `json:"title" jsonschema:"required,description=The main title of the article"`
-	Sections   []DocumentSection `json:"sections" jsonschema:"required,description=Array of document sections"`
-	TotalWords int               `json:"total_words" jsonschema:"required,description=Target total number of words for the article"`
-	Keywords   []string          `json:"keywords" jsonschema:"required,description=Principal keywords illustrating the article"`
+	Title      string             `json:"title" jsonschema:"required,description=The main title of the article"`
+	Sections   []*DocumentSection `json:"sections" jsonschema:"required,description=Array of document sections"`
+	TotalWords int                `json:"total_words" jsonschema:"required,description=Target total number of words for the article"`
+	Keywords   []string           `json:"keywords" jsonschema:"required,description=Principal keywords illustrating the article"`
 }
 
 // SectionContent represents completed content for a section
 type SectionContent struct {
-	SectionID string `json:"section_id"`
 	Title     string `json:"title"`
 	Content   string `json:"content"`
 	WordCount int    `json:"word_count"`
@@ -133,14 +132,16 @@ type SectionAssignmentEvent interface {
 	Subject() string
 	Context() context.Context
 	Origin() agent.MessageEvent
+	PreviousSection() *SectionContent
 }
 
 type BaseSectionAssignmentEvent struct {
-	id      agent.EventID
-	ctx     context.Context
-	section DocumentSection
-	subject string
-	origin  agent.MessageEvent
+	id              agent.EventID
+	ctx             context.Context
+	section         DocumentSection
+	previousSection *SectionContent
+	subject         string
+	origin          agent.MessageEvent
 }
 
 // ID implements SectionAssignmentEvent.
@@ -184,16 +185,22 @@ func (e *BaseSectionAssignmentEvent) Origin() agent.MessageEvent {
 	return e.origin
 }
 
+// PreviousSection implements SectionAssignmentEvent.
+func (e *BaseSectionAssignmentEvent) PreviousSection() *SectionContent {
+	return e.previousSection
+}
+
 var _ SectionAssignmentEvent = &BaseSectionAssignmentEvent{}
 
 // NewSectionAssignmentEvent creates a new section assignment event
-func NewSectionAssignmentEvent(ctx context.Context, section DocumentSection, subject string, origin agent.MessageEvent) *BaseSectionAssignmentEvent {
+func NewSectionAssignmentEvent(ctx context.Context, section DocumentSection, subject string, origin agent.MessageEvent, previousSectionContent *SectionContent) *BaseSectionAssignmentEvent {
 	return &BaseSectionAssignmentEvent{
-		id:      agent.NewEventID(),
-		ctx:     ctx,
-		section: section,
-		subject: subject,
-		origin:  origin,
+		id:              agent.NewEventID(),
+		ctx:             ctx,
+		section:         section,
+		subject:         subject,
+		origin:          origin,
+		previousSection: previousSectionContent,
 	}
 }
 

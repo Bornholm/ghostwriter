@@ -1,0 +1,45 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ghostwriter
+    targets: [linux_amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    dir: ./cmd/ghostwriter
+    binary: ghostwriter
+    flags:
+      - -trimpath
+    ldflags:
+      - -w -s -X 'github.com/bornholm/oplet/internal/build.Version={{ .Version }}'
+checksum:
+  name_template: "checksums.txt"
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  name_template: "v{{ .Version }}"
+
+dockers_v2:
+  - id: ghostwriter-oplet
+    sbom: false
+    platforms:
+      - linux/amd64
+    ids:
+      - ghostwriter
+    dockerfile: misc/oplet/Dockerfile
+    images:
+      - "ghcr.io/{{ tolower ( .Env.REPO_OWNER ) }}/ghostwriter-oplet"
+    tags:
+      - "{{ .Version }}"
+      - latest
+    extra_files:
+      - misc/oplet/run.sh

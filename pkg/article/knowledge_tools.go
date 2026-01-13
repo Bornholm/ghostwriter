@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/bornholm/genai/llm"
 	"github.com/pkg/errors"
@@ -18,12 +17,17 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 		"Add a research document to the knowledge base for later use by other agents",
 		llm.NewJSONSchema().
 			RequiredProperty("title", "title of the research document or source", "string").
-			RequiredProperty("content", "main content or key excerpts from the source", "string").
+			RequiredProperty("content", "main content from the source", "string").
 			RequiredProperty("source_type", "type of source (web, academic, news, government, industry)", "string").
 			RequiredProperty("url", "source URL if available, empty string if not", "string").
 			RequiredProperty("keywords", "comma-separated list of relevant keywords", "string").
 			RequiredProperty("relevance", "relevance score from 0.0 to 1.0", "number"),
 		func(ctx context.Context, params map[string]any) (string, error) {
+			url, err := llm.ToolParam[string](params, "url")
+			if err != nil {
+				return "", errors.WithStack(err)
+			}
+
 			title, err := llm.ToolParam[string](params, "title")
 			if err != nil {
 				return "", errors.WithStack(err)
@@ -35,11 +39,6 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 			}
 
 			sourceType, err := llm.ToolParam[string](params, "source_type")
-			if err != nil {
-				return "", errors.WithStack(err)
-			}
-
-			url, err := llm.ToolParam[string](params, "url")
 			if err != nil {
 				return "", errors.WithStack(err)
 			}
@@ -70,7 +69,6 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 
 			// Create research document
 			doc := ResearchDocument{
-				ID:         generateDocumentID(title),
 				URL:        url,
 				Title:      title,
 				Content:    content,
@@ -152,21 +150,4 @@ func formatSearchResults(results []ResearchDocument) string {
 	}
 
 	return sb.String()
-}
-
-// Helper function to generate document ID
-func generateDocumentID(title string) string {
-	// Create a simple ID from title and timestamp
-	cleanTitle := strings.ToLower(strings.ReplaceAll(title, " ", "_"))
-	// Remove special characters
-	cleanTitle = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			return r
-		}
-		return -1
-	}, cleanTitle)
-
-	// Add timestamp to ensure uniqueness
-	timestamp := time.Now().UnixNano()
-	return fmt.Sprintf("%s_%d", cleanTitle, timestamp)
 }

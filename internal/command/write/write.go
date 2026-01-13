@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,7 +21,6 @@ import (
 	"github.com/bornholm/genai/llm/ratelimit"
 	"github.com/bornholm/genai/llm/retry"
 	"github.com/bornholm/ghostwriter/pkg/article"
-	"github.com/bornholm/ghostwriter/pkg/tool"
 	"github.com/gosimple/slug"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
@@ -51,10 +52,15 @@ func Write() *cli.Command {
 				EnvVars: []string{"GHOSTWRITER_STYLE_GUIDE"},
 			},
 			&cli.StringFlag{
-				Name:      "workspace",
-				Value:     "",
-				Aliases:   []string{"w"},
-				EnvVars:   []string{"GHOSTWRITER_WORKSPACE"},
+				Name:    "research-depth",
+				Value:   string(article.ResearchBasic),
+				Aliases: []string{"d"},
+				EnvVars: []string{"GHOSTWRITER_RESEARCH_DEPTH"},
+			},
+			&cli.StringSliceFlag{
+				Name:      "files",
+				Aliases:   []string{"f"},
+				EnvVars:   []string{"GHOSTWRITER_FILES"},
 				TakesFile: true,
 			},
 			&cli.StringFlag{
@@ -76,12 +82,13 @@ func Write() *cli.Command {
 			targetWords := cliCtx.Int("target-words")
 			output := cliCtx.String("output")
 			styleGuide := cliCtx.String("style-guide")
-			workspace := cliCtx.String("workspace")
+			files := cliCtx.StringSlice("files")
 			additionalContext := cliCtx.String("additional-context")
+			researchDepth := cliCtx.String("research-depth")
 
 			subject = strings.TrimSpace(subject)
 
-			ctx, cancel := context.WithTimeout(cliCtx.Context, 2*time.Hour)
+			ctx, cancel := context.WithTimeout(cliCtx.Context, time.Hour)
 			defer cancel()
 
 			// Create a LLM chat completion client
@@ -114,9 +121,7 @@ func Write() *cli.Command {
 
 			orchestratorOptions := []article.OrchestratorOptionFunc{
 				article.WithTargetWordCount(targetWords),
-				article.WithMaxConcurrentWriters(2),
-				article.WithResearchDepth(article.ResearchBasic),
-				article.WithTimeout(time.Hour),
+				article.WithResearchDepth(article.ResearchDepth(researchDepth)),
 			}
 
 			if styleGuide != "" {
@@ -139,24 +144,19 @@ func Write() *cli.Command {
 				additionalContextBuilder.WriteString(string(data))
 			}
 
-			tools := tool.GetDefaultResearchTools()
+			tools := make([]llm.Tool, 0)
 
-			if workspace != "" {
-				root, err := os.OpenRoot(workspace)
-				if err != nil {
-					return errors.Wrapf(err, "failed to read style guidelines file")
+			kb, err := article.NewKnowledgeBase()
+			if err != nil {
+				return errors.Wrapf(err, "could not create knowledge base")
+			}
+
+			orchestratorOptions = append(orchestratorOptions, article.WithKnowledgeBase(kb))
+
+			if len(files) > 0 {
+				if err := bootstrapKnowledgeBase(kb, files); err != nil {
+					return errors.Wrap(err, "could not bootstrap knowledge base")
 				}
-
-				tools = append(tools, tool.NewFSTools(root.FS())...)
-
-				tree, err := tool.GenerateDirectoryTree(root.FS(), ".", ".git")
-				if err != nil {
-					return errors.Wrapf(err, "failed to generate workspace directory tree")
-				}
-
-				additionalContextBuilder.WriteString("\n\n**Workspace:**\n\n")
-				additionalContextBuilder.WriteString("This is the directory tree of the files you have access to:\n\n")
-				additionalContextBuilder.WriteString(tree)
 			}
 
 			orchestratorOptions = append(orchestratorOptions, article.WithTools(tools))
@@ -267,4 +267,42 @@ func logProgress(ctx context.Context, progressCh <-chan article.ProgressEvent, d
 			return
 		}
 	}
+}
+
+func bootstrapKnowledgeBase(kb *article.KnowledgeBase, files []string) error {
+	for _, f := range files {
+		matches, err := filepath.Glob(f)
+		if err != nil {
+			return errors.Wrapf(err, "could not match file pattern '%s'", f)
+		}
+		for _, m := range matches {
+			absPath, err := filepath.Abs(f)
+			if err != nil {
+				return errors.Wrapf(err, "could not retrieve absolute path for file '%s'", f)
+			}
+
+			data, err := os.ReadFile(f)
+			if err != nil {
+				return errors.Wrapf(err, "could not read file '%s'", m)
+			}
+
+			url := &url.URL{
+				Scheme: "file",
+				Path:   absPath,
+			}
+
+			err = kb.AddDocument(article.ResearchDocument{
+				URL:        url.String(),
+				Title:      filepath.Base(m),
+				Content:    string(data),
+				Keywords:   []string{},
+				SourceType: "file",
+				Relevance:  1,
+			})
+			if err != nil {
+				return errors.WithStack(err)
+			}
+		}
+	}
+	return nil
 }

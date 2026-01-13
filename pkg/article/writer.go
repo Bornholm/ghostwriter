@@ -19,6 +19,7 @@ var writerPrompts embed.FS
 // WriterHandler handles section writing requests
 type WriterHandler struct {
 	client llm.ChatCompletionClient
+	tools  []llm.Tool
 }
 
 // Handle implements agent.Handler for writing requests
@@ -31,10 +32,9 @@ func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 	ctx := input.Context()
 	section := assignmentEvent.Section()
 	subject := assignmentEvent.Subject()
+	previousSection := assignmentEvent.PreviousSection()
 
 	// Get context values
-	writerID := ContextWriterID(ctx, "writer")
-	researchDepth := ContextResearchDepth(ctx, ResearchDeep)
 	agentRole := ContextAgentRole(ctx, RoleWriter)
 
 	if agentRole != RoleWriter {
@@ -43,8 +43,6 @@ func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 
 	// Create writing context
 	writingCtx := WithContextSubject(ctx, subject)
-	writingCtx = WithContextWriterID(writingCtx, writerID)
-	writingCtx = WithContextResearchDepth(writingCtx, researchDepth)
 
 	// Pass through style guidelines if available
 	styleGuidelines := ContextStyleGuidelines(ctx, "")
@@ -59,7 +57,7 @@ func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 	}
 
 	// Write the section content using knowledge base
-	content, err := h.writeSection(writingCtx, section, subject)
+	content, err := h.writeSection(writingCtx, section, subject, previousSection)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -72,9 +70,8 @@ func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) erro
 }
 
 // writeSectionFromKnowledgeBase creates content using knowledge base queries
-func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSection, subject string) (SectionContent, error) {
+func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSection, subject string, previousSection *SectionContent) (SectionContent, error) {
 	tracker := NewProgressTracker(ctx)
-	writerID := ContextWriterID(ctx, "writer")
 
 	// Get knowledge base from context
 	kb, hasKB := ContextKnowledgeBase(ctx)
@@ -82,9 +79,8 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 		return SectionContent{}, errors.New("knowledge base not available in context")
 	}
 
-	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("[%s] Querying knowledge base for: %s", writerID, section.Title),
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Querying knowledge base for: %s", section.Title),
 		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
-			"writer_id":     writerID,
 			"section_id":    section.ID,
 			"section_title": section.Title,
 			"step":          "knowledge_query",
@@ -97,18 +93,15 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 	}
 
 	// Create knowledge-based writing tools
-	knowledgeTools := []llm.Tool{
-		NewSearchKnowledgeBaseTool(kb),
-	}
+	tools := append(h.tools, NewSearchKnowledgeBaseTool(kb))
 
 	// Create section writing prompt
 	styleGuidelines := ContextStyleGuidelines(ctx, "")
 	additionalContext := ContextAdditionalContext(ctx, "")
-	userPrompt := h.createKnowledgeBasedSectionPrompt(section, subject, styleGuidelines, additionalContext)
+	userPrompt := h.createKnowledgeBasedSectionPrompt(section, subject, styleGuidelines, additionalContext, previousSection)
 
-	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("[%s] Writing content using knowledge base: %s", writerID, section.Title),
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Writing content using knowledge base: %s", section.Title),
 		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
-			"writer_id":     writerID,
 			"section_id":    section.ID,
 			"section_title": section.Title,
 			"step":          "content_writing",
@@ -122,10 +115,10 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 		llm.NewMessage(llm.RoleSystem, systemPrompt),
 		llm.NewMessage(llm.RoleUser, userPrompt),
 	})
-	taskCtx = agent.WithContextTools(taskCtx, knowledgeTools)
+	taskCtx = agent.WithContextTools(taskCtx, tools)
 
 	// Create task handler
-	taskHandler := task.NewHandler(h.client, task.WithDefaultTools(knowledgeTools...))
+	taskHandler := task.NewHandler(h.client)
 	writerAgent := agent.New(taskHandler)
 
 	// Start the agent
@@ -140,9 +133,8 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 		return SectionContent{}, errors.WithStack(err)
 	}
 
-	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("[%s] Processing content and extracting sources: %s", writerID, section.Title),
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Processing content and extracting sources: %s", section.Title),
 		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
-			"writer_id":     writerID,
 			"section_id":    section.ID,
 			"section_title": section.Title,
 			"step":          "content_processing",
@@ -153,15 +145,13 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 	// Create section content
 	wordCount := h.countWords(content)
 	sectionContent := SectionContent{
-		SectionID: section.ID,
 		Title:     section.Title,
 		Content:   content,
 		WordCount: wordCount,
 	}
 
-	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("[%s] Completed section: %s (%d words)", writerID, section.Title, wordCount),
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Completed section: %s (%d words)", section.Title, wordCount),
 		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
-			"writer_id":         writerID,
 			"section_id":        section.ID,
 			"section_title":     section.Title,
 			"step":              "section_complete",
@@ -173,7 +163,7 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 }
 
 // createKnowledgeBasedSectionPrompt creates prompt for knowledge-based writing
-func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSection, subject string, styleGuidelines string, additionalContext string) string {
+func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSection, subject string, styleGuidelines string, additionalContext string, previousSection *SectionContent) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Write a comprehensive section using the research knowledge base.\n\n")
@@ -202,7 +192,8 @@ func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSectio
 	}
 
 	prompt.WriteString("\n**Available Tools:**\n")
-	prompt.WriteString("- `search_knowledge_base`: Full-text search across research\n\n")
+	prompt.WriteString("- `search_knowledge_base`: Full-text search across knowledge base\n")
+	prompt.WriteString("- `scrape_webpage`: Fetch a web resource content by its URL\n\n")
 
 	prompt.WriteString("**Instructions:**\n")
 	prompt.WriteString("1. Use the knowledge base tools to gather relevant information for this section\n")
@@ -226,6 +217,17 @@ func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSectio
 		prompt.WriteString("\n```\n\n")
 	}
 
+	if previousSection != nil {
+		prompt.WriteString("**Previous section:**\n")
+		prompt.WriteString("- **Title:** ")
+		prompt.WriteString(previousSection.Title)
+		prompt.WriteString("\n")
+		prompt.WriteString("- **Content:**\n")
+		prompt.WriteString(previousSection.Content)
+
+		prompt.WriteString("\n---\n\n")
+	}
+
 	prompt.WriteString("Start by querying the knowledge base for relevant information, then write your section content.")
 
 	return prompt.String()
@@ -241,9 +243,10 @@ func (h *WriterHandler) countWords(text string) int {
 }
 
 // NewWriterHandler creates a new writer handler (updated)
-func NewWriterHandler(client llm.ChatCompletionClient) *WriterHandler {
+func NewWriterHandler(client llm.ChatCompletionClient, tools ...llm.Tool) *WriterHandler {
 	return &WriterHandler{
 		client: client,
+		tools:  tools,
 	}
 }
 

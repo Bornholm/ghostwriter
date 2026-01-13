@@ -4,46 +4,39 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"sync"
-	"time"
 
 	"github.com/bornholm/genai/agent"
 	"github.com/bornholm/genai/llm"
+	"github.com/bornholm/ghostwriter/pkg/scraper/surf"
+	"github.com/bornholm/ghostwriter/pkg/search/duckduckgo"
 	"github.com/bornholm/ghostwriter/pkg/tool"
 	"github.com/pkg/errors"
 )
 
 // Orchestrator coordinates the multi-agent article writing process
 type Orchestrator struct {
-	researchAgent *agent.Agent // NEW
+	researchAgent *agent.Agent
 	plannerAgent  *agent.Agent
-	writerAgents  []*agent.Agent
+	writerAgent   *agent.Agent
 	editorAgent   *agent.Agent
-
-	// Configuration
-	maxConcurrentWriters int
-	timeout              time.Duration
 }
 
 // OrchestratorOptions configures the orchestrator
 type OrchestratorOptions struct {
-	MaxConcurrentWriters int
-	Timeout              time.Duration
-	TargetWordCount      int
-	ResearchDepth        ResearchDepth
-	StyleGuidelines      string
-	AdditionalContext    string
-	Tools                []llm.Tool
+	TargetWordCount   int
+	ResearchDepth     ResearchDepth
+	StyleGuidelines   string
+	AdditionalContext string
+	Tools             []llm.Tool
+	KnowledgeBase     *KnowledgeBase
 }
 
 func NewOrchestratorOptions(optFuncs ...OrchestratorOptionFunc) *OrchestratorOptions {
 	// Apply options
 	opts := &OrchestratorOptions{
-		MaxConcurrentWriters: 3,
-		Timeout:              30 * time.Minute,
-		TargetWordCount:      1500,
-		ResearchDepth:        ResearchDeep,
-		Tools:                tool.GetDefaultResearchTools(),
+		TargetWordCount: 1500,
+		ResearchDepth:   ResearchDeep,
+		Tools:           make([]llm.Tool, 0),
 	}
 	for _, fn := range optFuncs {
 		fn(opts)
@@ -53,20 +46,6 @@ func NewOrchestratorOptions(optFuncs ...OrchestratorOptionFunc) *OrchestratorOpt
 
 // OrchestratorOptionFunc is a function that configures orchestrator options
 type OrchestratorOptionFunc func(*OrchestratorOptions)
-
-// WithMaxConcurrentWriters sets the maximum number of concurrent writers
-func WithMaxConcurrentWriters(max int) OrchestratorOptionFunc {
-	return func(opts *OrchestratorOptions) {
-		opts.MaxConcurrentWriters = max
-	}
-}
-
-// WithTimeout sets the overall timeout for article generation
-func WithTimeout(timeout time.Duration) OrchestratorOptionFunc {
-	return func(opts *OrchestratorOptions) {
-		opts.Timeout = timeout
-	}
-}
 
 // WithTargetWordCount sets the target word count for the article
 func WithTargetWordCount(wordCount int) OrchestratorOptionFunc {
@@ -96,6 +75,13 @@ func WithTools(tools []llm.Tool) OrchestratorOptionFunc {
 	}
 }
 
+// WithKnowledgeBase sets knowledge base for all agents
+func WithKnowledgeBase(kb *KnowledgeBase) OrchestratorOptionFunc {
+	return func(opts *OrchestratorOptions) {
+		opts.KnowledgeBase = kb
+	}
+}
+
 // WithAdditionalContext sets additional context information for all agents
 func WithAdditionalContext(additionalContext string) OrchestratorOptionFunc {
 	return func(opts *OrchestratorOptions) {
@@ -106,10 +92,6 @@ func WithAdditionalContext(additionalContext string) OrchestratorOptionFunc {
 // WriteArticle orchestrates the complete article writing process
 func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFuncs ...OrchestratorOptionFunc) (Document, error) {
 	opts := NewOrchestratorOptions(optFuncs...)
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
 
 	// Add style guidelines to context if provided
 	if opts.StyleGuidelines != "" {
@@ -126,17 +108,25 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 	tracker.EmitProgress(PhaseInitializing, "Starting article generation", 0.0, map[string]interface{}{
 		"subject":           subject,
 		"target_word_count": opts.TargetWordCount,
-		"max_writers":       opts.MaxConcurrentWriters,
 	})
+
+	knowledgeBase := opts.KnowledgeBase
+	if knowledgeBase == nil {
+		kb, err := NewKnowledgeBase()
+		if err != nil {
+			return Document{}, errors.WithStack(err)
+		}
+
+		knowledgeBase = kb
+	}
 
 	// Step 1: Conduct comprehensive research and build knowledge base
 	tracker.EmitPhaseStart(PhaseResearching, "Starting comprehensive research", GetPhaseBaseProgress(PhaseResearching))
-	kb, err := o.conductResearch(ctx, subject, opts.ResearchDepth)
-	if err != nil {
+	if err := o.conductResearch(ctx, subject, opts.ResearchDepth, knowledgeBase); err != nil {
 		return Document{}, errors.WithStack(err)
 	}
 	// Add knowledge base to context for subsequent phases
-	ctx = WithContextKnowledgeBase(ctx, kb)
+	ctx = WithContextKnowledgeBase(ctx, knowledgeBase)
 	ctx = WithContextResearchComplete(ctx, true)
 	tracker.EmitPhaseComplete(PhaseResearching, "Research completed", GetPhaseBaseProgress(PhasePlanning))
 
@@ -170,10 +160,9 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 	})
 
 	// Step 5: Collecte research documents
-	documents := kb.GetAllDocuments()
+	documents := knowledgeBase.GetAllDocuments()
 	for _, d := range documents {
 		article.Sources = append(article.Sources, Source{
-			ID:         d.ID,
 			URL:        d.URL,
 			Title:      d.Title,
 			Keywords:   d.Keywords,
@@ -196,32 +185,32 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 }
 
 // conductResearch uses the research agent to build knowledge base
-func (o *Orchestrator) conductResearch(ctx context.Context, subject string, depth ResearchDepth) (*KnowledgeBase, error) {
+func (o *Orchestrator) conductResearch(ctx context.Context, subject string, depth ResearchDepth, kb *KnowledgeBase) error {
 	// Create research context
 	researchCtx := WithContextAgentRole(ctx, RoleResearcher)
 	researchCtx = WithContextSubject(researchCtx, subject)
 	researchCtx = WithContextResearchDepth(researchCtx, depth)
 
 	// Send research request
-	researchRequest := NewResearchRequestEvent(researchCtx, subject, depth)
+	researchRequest := NewResearchRequestEvent(researchCtx, subject, depth, kb)
 	if err := o.researchAgent.In(researchRequest); err != nil {
-		return nil, errors.WithStack(err)
+		return errors.WithStack(err)
 	}
 
 	// Wait for research result
 	select {
 	case evt := <-o.researchAgent.Output():
-		if researchEvent, ok := evt.(*ResearchCompleteEvent); ok {
+		if _, ok := evt.(*ResearchCompleteEvent); ok {
 			// Research events don't need to match request ID since they're generated internally
-			return researchEvent.KB, nil
+			return nil
 		}
-		return nil, errors.New("unexpected event type from researcher")
+		return errors.New("unexpected event type from researcher")
 
 	case err := <-o.researchAgent.Err():
-		return nil, errors.WithStack(err)
+		return errors.WithStack(err)
 
 	case <-ctx.Done():
-		return nil, errors.WithStack(ctx.Err())
+		return errors.WithStack(ctx.Err())
 	}
 }
 
@@ -269,95 +258,63 @@ func (o *Orchestrator) generatePlan(ctx context.Context, subject string, targetW
 // writeSections coordinates multiple writer agents to write sections
 func (o *Orchestrator) writeSections(ctx context.Context, plan DocumentPlan, subject string, opts *OrchestratorOptions) ([]SectionContent, error) {
 	sections := make([]SectionContent, len(plan.Sections))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var writeErr error
 	var completedSections int
 
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
 	totalSections := len(plan.Sections)
 
-	// Create a semaphore to limit concurrent writers
-	semaphore := make(chan struct{}, opts.MaxConcurrentWriters)
+	var previousSectionContent *SectionContent
 
-	for i, section := range plan.Sections {
-		wg.Add(1)
-		go func(index int, sec DocumentSection) {
-			defer wg.Done()
+	for index, section := range plan.Sections {
+		select {
+		case <-ctx.Done():
+			return nil, errors.WithStack(ctx.Err())
+		default:
+		}
 
-			// Acquire semaphore
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
+		// Emit progress for section start
+		tracker.EmitSubProgress(PhaseWriting, fmt.Sprintf("Writing section: %s", section.Title),
+			GetPhaseBaseProgress(PhaseWriting), 0.0, WritingWeight, map[string]interface{}{
+				"section_id":    section.ID,
+				"section_title": section.Title,
+				"word_count":    section.WordCount,
+			})
 
-			// Check if context is cancelled
-			select {
-			case <-ctx.Done():
-				mu.Lock()
-				if writeErr == nil {
-					writeErr = ctx.Err()
-				}
-				mu.Unlock()
-				return
-			default:
-			}
+		// Write the section
+		content, err := o.writeSection(ctx, *section, subject, opts.ResearchDepth, index, previousSectionContent)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
 
-			// Emit progress for section start
-			tracker.EmitSubProgress(PhaseWriting, fmt.Sprintf("Writing section: %s", sec.Title),
-				GetPhaseBaseProgress(PhaseWriting), 0.0, WritingWeight, map[string]interface{}{
-					"section_id":    sec.ID,
-					"section_title": sec.Title,
-					"word_count":    sec.WordCount,
-				})
+		previousSectionContent = &content
 
-			// Write the section
-			content, err := o.writeSection(ctx, sec, subject, opts.ResearchDepth, index)
-			if err != nil {
-				mu.Lock()
-				if writeErr == nil {
-					writeErr = err
-				}
-				mu.Unlock()
-				return
-			}
+		sections[index] = content
+		completedSections++
+		currentProgress := float64(completedSections) / float64(totalSections)
 
-			mu.Lock()
-			sections[index] = content
-			completedSections++
-			currentProgress := float64(completedSections) / float64(totalSections)
-			mu.Unlock()
-
-			// Emit progress for section completion
-			tracker.EmitSubProgress(PhaseWriting, fmt.Sprintf("Completed section: %s (%d words)", content.Title, content.WordCount),
-				GetPhaseBaseProgress(PhaseWriting), currentProgress, WritingWeight, map[string]interface{}{
-					"section_id":         content.SectionID,
-					"section_title":      content.Title,
-					"actual_word_count":  content.WordCount,
-					"completed_sections": completedSections,
-					"total_sections":     totalSections,
-				})
-		}(i, section)
-	}
-
-	wg.Wait()
-
-	if writeErr != nil {
-		return nil, errors.WithStack(writeErr)
+		// Emit progress for section completion
+		tracker.EmitSubProgress(PhaseWriting, fmt.Sprintf("Completed section: %s (%d words)", content.Title, content.WordCount),
+			GetPhaseBaseProgress(PhaseWriting), currentProgress, WritingWeight, map[string]interface{}{
+				"section_title":      content.Title,
+				"actual_word_count":  content.WordCount,
+				"completed_sections": completedSections,
+				"total_sections":     totalSections,
+			})
 	}
 
 	return sections, nil
 }
 
 // writeSection assigns a section to a writer agent
-func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection, subject string, depth ResearchDepth, writerIndex int) (SectionContent, error) {
+func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection, subject string, depth ResearchDepth, writerIndex int, previousSectionContent *SectionContent) (SectionContent, error) {
 	// Select a writer agent (round-robin)
-	writerAgent := o.writerAgents[writerIndex%len(o.writerAgents)]
+	writerAgent := o.writerAgent
 
 	// Create writing context
 	writeCtx := WithContextAgentRole(ctx, RoleWriter)
 	writeCtx = WithContextSubject(writeCtx, subject)
 	writeCtx = WithContextResearchDepth(writeCtx, depth)
-	writeCtx = WithContextWriterID(writeCtx, fmt.Sprintf("writer_%d", writerIndex))
 
 	// Add style guidelines if available from parent context
 	styleGuidelines := ContextStyleGuidelines(ctx, "")
@@ -372,7 +329,7 @@ func (o *Orchestrator) writeSection(ctx context.Context, section DocumentSection
 	}
 
 	// Create section assignment
-	assignment := NewSectionAssignmentEvent(writeCtx, section, subject, nil)
+	assignment := NewSectionAssignmentEvent(writeCtx, section, subject, nil, previousSectionContent)
 
 	// Send to writer
 	if err := writerAgent.In(assignment); err != nil {
@@ -448,11 +405,9 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 		return errors.WithStack(err)
 	}
 
-	// Start writer agents
-	for i, writerAgent := range o.writerAgents {
-		if _, _, err := writerAgent.Start(ctx); err != nil {
-			return errors.Wrapf(err, "failed to start writer agent %d", i)
-		}
+	// Start writer agent
+	if _, _, err := o.writerAgent.Start(ctx); err != nil {
+		return errors.WithStack(err)
 	}
 
 	// Start editor agent
@@ -477,11 +432,9 @@ func (o *Orchestrator) Stop() error {
 		errs = append(errs, errors.Wrap(err, "failed to stop planner agent"))
 	}
 
-	// Stop writers
-	for i, writerAgent := range o.writerAgents {
-		if err := writerAgent.Stop(); err != nil {
-			errs = append(errs, errors.Wrapf(err, "failed to stop writer agent %d", i))
-		}
+	// Stop writer
+	if err := o.writerAgent.Stop(); err != nil {
+		errs = append(errs, errors.Wrap(err, "failed to stop writer agent"))
 	}
 
 	// Stop editor
@@ -497,33 +450,30 @@ func (o *Orchestrator) Stop() error {
 }
 
 // NewOrchestrator creates a new article writing orchestrator
-func NewOrchestrator(client llm.ChatCompletionClient, tools []llm.Tool) *Orchestrator {
-	// Create research agent with research tools
-	researchHandler := NewResearchAgent(client, tools...)
+func NewOrchestrator(client llm.ChatCompletionClient, tools ...llm.Tool) *Orchestrator {
+	scraper := surf.NewScraper()
+	scraperTool := tool.NewScrapeWebpageTool(scraper)
+
+	researchHandler := NewResearchAgent(client, duckduckgo.NewClient(scraper), scraper)
 	researchAgent := agent.New(researchHandler)
 
-	// Create planner agent (no longer needs research tools)
-	plannerHandler := NewPlannerHandler(client)
+	plannerTools := append(tools, scraperTool)
+	plannerHandler := NewPlannerHandler(client, plannerTools...)
 	plannerAgent := agent.New(plannerHandler)
 
-	// Create multiple writer agents for concurrent processing (no longer need research tools)
-	writerAgents := make([]*agent.Agent, 3)
-	for i := 0; i < 3; i++ {
-		writerHandler := NewWriterHandler(client)
-		writerAgents[i] = agent.New(writerHandler)
-	}
+	writerTools := append(tools, scraperTool)
+	writerHandler := NewWriterHandler(client, writerTools...)
+	writerAgent := agent.New(writerHandler)
 
 	// Create editor agent
 	editorHandler := NewEditorHandler(client)
 	editorAgent := agent.New(editorHandler)
 
 	return &Orchestrator{
-		researchAgent:        researchAgent,
-		plannerAgent:         plannerAgent,
-		writerAgents:         writerAgents,
-		editorAgent:          editorAgent,
-		maxConcurrentWriters: 3,
-		timeout:              30 * time.Minute,
+		researchAgent: researchAgent,
+		plannerAgent:  plannerAgent,
+		writerAgent:   writerAgent,
+		editorAgent:   editorAgent,
 	}
 }
 
@@ -532,7 +482,7 @@ func WriteArticle(ctx context.Context, client llm.ChatCompletionClient, subject 
 	opts := NewOrchestratorOptions(optFuncs...)
 
 	// Create orchestrator with default research tools
-	orchestrator := NewOrchestrator(client, opts.Tools)
+	orchestrator := NewOrchestrator(client, opts.Tools...)
 
 	// Start the orchestrator
 	if err := orchestrator.Start(ctx); err != nil {

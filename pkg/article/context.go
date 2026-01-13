@@ -11,7 +11,6 @@ const (
 	ContextKeySubject           agent.ContextKey = "article_subject"
 	ContextKeyTargetWordCount   agent.ContextKey = "article_target_word_count"
 	ContextKeyResearchDepth     agent.ContextKey = "article_research_depth"
-	ContextKeyWriterID          agent.ContextKey = "article_writer_id"
 	ContextKeyAgentRole         agent.ContextKey = "article_agent_role"
 	ContextKeyStyleGuidelines   agent.ContextKey = "article_style_guidelines"
 	ContextKeyAdditionalContext agent.ContextKey = "article_additional_context"
@@ -80,16 +79,6 @@ func WithContextResearchDepth(ctx context.Context, depth ResearchDepth) context.
 // ContextResearchDepth retrieves the research depth from context
 func ContextResearchDepth(ctx context.Context, defaultDepth ResearchDepth) ResearchDepth {
 	return agent.ContextValue(ctx, ContextKeyResearchDepth, defaultDepth)
-}
-
-// WithContextWriterID adds writer ID to the context
-func WithContextWriterID(ctx context.Context, writerID string) context.Context {
-	return context.WithValue(ctx, ContextKeyWriterID, writerID)
-}
-
-// ContextWriterID retrieves the writer ID from context
-func ContextWriterID(ctx context.Context, defaultWriterID string) string {
-	return agent.ContextValue(ctx, ContextKeyWriterID, defaultWriterID)
 }
 
 // WithContextAgentRole adds agent role to the context

@@ -19,7 +19,7 @@ var plannerPrompts embed.FS
 // PlannerHandler handles document planning requests
 type PlannerHandler struct {
 	client llm.ChatCompletionClient
-	// Removed: tools []llm.Tool - No longer needs research tools
+	tools  []llm.Tool
 }
 
 // Handle implements agent.Handler for planning requests
@@ -129,7 +129,7 @@ func (h *PlannerHandler) generatePlan(ctx context.Context, subject string, targe
 		})
 
 	// Parse the plan response
-	plan, err := h.parsePlanResponse(response.Message().Content())
+	plan, err := h.parsePlanResponse(response.Message().Content(), targetWordCount)
 	if err != nil {
 		return DocumentPlan{}, errors.WithStack(err)
 	}
@@ -171,10 +171,7 @@ func (h *PlannerHandler) createPlanningPrompt(subject string, targetWordCount in
 
 	// Include key research findings
 	prompt.WriteString("**Key Research Findings:**\n")
-	for i, doc := range researchDocs {
-		if i >= 5 { // Limit to top 5 documents to avoid prompt bloat
-			break
-		}
+	for _, doc := range researchDocs {
 		prompt.WriteString(fmt.Sprintf("- **%s** (%s)", doc.Title, doc.SourceType))
 	}
 	prompt.WriteString("\n")
@@ -190,9 +187,6 @@ func (h *PlannerHandler) createPlanningPrompt(subject string, targetWordCount in
 	prompt.WriteString("**Key Topics Identified:**\n")
 	keywordCount := 0
 	for keyword, count := range allKeywords {
-		if keywordCount >= 10 {
-			break
-		}
 		prompt.WriteString(fmt.Sprintf("- %s (mentioned %d times)\n", keyword, count))
 		keywordCount++
 	}
@@ -236,7 +230,7 @@ func (h *PlannerHandler) createPlanningPrompt(subject string, targetWordCount in
 }
 
 // parsePlanResponse extracts the document plan from the LLM response
-func (h *PlannerHandler) parsePlanResponse(response string) (DocumentPlan, error) {
+func (h *PlannerHandler) parsePlanResponse(response string, targetWordCount int) (DocumentPlan, error) {
 	// Create a message from the response string for parsing
 	message := llm.NewMessage(llm.RoleAssistant, response)
 
@@ -248,14 +242,14 @@ func (h *PlannerHandler) parsePlanResponse(response string) (DocumentPlan, error
 
 	plan := plans[0]
 
-	if err := h.validatePlan(plan); err == nil {
+	if err := h.validatePlan(&plan, targetWordCount); err != nil {
 		return DocumentPlan{}, errors.WithStack(err)
 	}
 
 	// Generate section IDs if missing
 	for i := range plan.Sections {
 		if plan.Sections[i].ID == "" {
-			plan.Sections[i].ID = generateSectionID(i, plan.Sections[i].Title)
+			plan.Sections[i].ID = generateSectionID(plan.Sections[i].Title)
 		}
 	}
 
@@ -263,7 +257,7 @@ func (h *PlannerHandler) parsePlanResponse(response string) (DocumentPlan, error
 }
 
 // validatePlan ensures the document plan is valid
-func (h *PlannerHandler) validatePlan(plan DocumentPlan) error {
+func (h *PlannerHandler) validatePlan(plan *DocumentPlan, targetWordCount int) error {
 	if plan.Title == "" {
 		return errors.New("document plan must have a title")
 	}
@@ -278,7 +272,7 @@ func (h *PlannerHandler) validatePlan(plan DocumentPlan) error {
 			return errors.Errorf("section %d must have a title", i)
 		}
 		if section.WordCount <= 0 {
-			return errors.Errorf("section %d must have a positive word count", i)
+			section.WordCount = targetWordCount / len(plan.Sections)
 		}
 		totalWords += section.WordCount
 	}
@@ -292,7 +286,7 @@ func (h *PlannerHandler) validatePlan(plan DocumentPlan) error {
 }
 
 // generateSectionID creates a unique ID for a section
-func generateSectionID(index int, title string) string {
+func generateSectionID(title string) string {
 	// Create a simple ID from index and title
 	cleanTitle := strings.ToLower(strings.ReplaceAll(title, " ", "_"))
 	// Remove special characters
@@ -324,10 +318,10 @@ func (h *PlannerHandler) createDocumentPlanSchema() llm.ResponseSchema {
 }
 
 // NewPlannerHandler creates a new planner handler (updated)
-func NewPlannerHandler(client llm.ChatCompletionClient) *PlannerHandler {
+func NewPlannerHandler(client llm.ChatCompletionClient, tools ...llm.Tool) *PlannerHandler {
 	return &PlannerHandler{
 		client: client,
-		// No longer needs tools - uses knowledge base instead
+		tools:  tools,
 	}
 }
 
