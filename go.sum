@@ -73,8 +73,8 @@ github.com/blevesearch/zapx/v15 v15.4.2 h1:sWxpDE0QQOTjyxYbAVjt3+0ieu8NCE0fDRaFx
 github.com/blevesearch/zapx/v15 v15.4.2/go.mod h1:1pssev/59FsuWcgSnTa0OeEpOzmhtmr/0/11H0Z8+Nw=
 github.com/blevesearch/zapx/v16 v16.2.7 h1:xcgFRa7f/tQXOwApVq7JWgPYSlzyUMmkuYa54tMDuR0=
 github.com/blevesearch/zapx/v16 v16.2.7/go.mod h1:murSoCJPCk25MqURrcJaBQ1RekuqSCSfMjXH4rHyA14=
-github.com/bornholm/genai v0.0.3 h1:RVRlQivwaKNQuIpamFtzi5ib1jogXUM9tWlO9Wj2Z7A=
-github.com/bornholm/genai v0.0.3/go.mod h1:3PzE6ShRVN+CcdtM1z5dpt7SyR/1PsZl/5Rf451LE1A=
+github.com/bornholm/genai v0.0.6 h1:lF/HXh5rkXgeIfPxyZ2EiKzzJxW4bXnZrWbbHHfIwVM=
+github.com/bornholm/genai v0.0.6/go.mod h1:xHuGNjnMJLJzJ+je71V1lA6iQgkhAbaqJMiAjI4rsi4=
 github.com/buger/jsonparser v1.1.1 h1:2PnMjfWD7wBILjqQbt530v576A/cAbQvEW9gGIpYMUs=
 github.com/buger/jsonparser v1.1.1/go.mod h1:6RYKKt7H4d4+iWqouImQ9R2FZql3VbhNgx27UK13J/0=
 github.com/caarlos0/env/v11 v11.3.1 h1:cArPWC15hWmEt+gWk7YBi7lEXTXCvpaSdCiZE2X5mCA=
@@ -223,8 +223,8 @@ github.com/quic-go/quic-go v0.39.0 h1:AgP40iThFMY0bj8jGxROhw3S0FMGa8ryqsmi9tBH3S
 github.com/quic-go/quic-go v0.39.0/go.mod h1:T09QsDQWjLiQ74ZmacDfqZmhY/NLnw5BC40MANNNZ1Q=
 github.com/refraction-networking/utls v1.5.4 h1:9k6EO2b8TaOGsQ7Pl7p9w6PUhx18/ZCeT0WNTZ7Uw4o=
 github.com/refraction-networking/utls v1.5.4/go.mod h1:SPuDbBmgLGp8s+HLNc83FuavwZCFoMmExj+ltUHiHUw=
-github.com/revrost/go-openrouter v1.0.0 h1:aqsENhgUp2nr7/iggdtoDwDWHDhfENTRyMXraWXwIxc=
-github.com/revrost/go-openrouter v1.0.0/go.mod h1:jZFcumFqvS25o8oEQc1/+4yeK7lHDSnwPMIJ/pKPdNc=
+github.com/revrost/go-openrouter v1.1.5 h1:YkTxdRrkfTf5Y78Daa4a3k+WgX6KIKkLgDri2ZSndJ4=
+github.com/revrost/go-openrouter v1.1.5/go.mod h1:jZFcumFqvS25o8oEQc1/+4yeK7lHDSnwPMIJ/pKPdNc=
 github.com/rogpeppe/go-internal v1.13.1 h1:KvO1DLK/DRN07sQ1LQKScxyZJuNnedQ5/wKSR38lUII=
 github.com/rogpeppe/go-internal v1.13.1/go.mod h1:uMEvuHeurkdAXX61udpOXGD/AzZDWNMNyH2VO9fmH0o=
 github.com/rs/xid v1.6.0 h1:fV591PaemRlL6JfRxGDEPl69wICngIQ3shQtzfy2gxU=

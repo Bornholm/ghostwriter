@@ -122,7 +122,7 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 
 	// Step 1: Conduct comprehensive research and build knowledge base
 	tracker.EmitPhaseStart(PhaseResearching, "Starting comprehensive research", GetPhaseBaseProgress(PhaseResearching))
-	if err := o.conductResearch(ctx, subject, opts.ResearchDepth, knowledgeBase); err != nil {
+	if err := o.conductResearch(ctx, subject, opts.ResearchDepth, knowledgeBase, opts); err != nil {
 		return Document{}, errors.WithStack(err)
 	}
 	// Add knowledge base to context for subsequent phases
@@ -185,11 +185,16 @@ func (o *Orchestrator) WriteArticle(ctx context.Context, subject string, optFunc
 }
 
 // conductResearch uses the research agent to build knowledge base
-func (o *Orchestrator) conductResearch(ctx context.Context, subject string, depth ResearchDepth, kb *KnowledgeBase) error {
+func (o *Orchestrator) conductResearch(ctx context.Context, subject string, depth ResearchDepth, kb *KnowledgeBase, opts *OrchestratorOptions) error {
 	// Create research context
 	researchCtx := WithContextAgentRole(ctx, RoleResearcher)
 	researchCtx = WithContextSubject(researchCtx, subject)
 	researchCtx = WithContextResearchDepth(researchCtx, depth)
+
+	// Add additional context if provided
+	if opts.AdditionalContext != "" {
+		researchCtx = WithContextAdditionalContext(researchCtx, opts.AdditionalContext)
+	}
 
 	// Send research request
 	researchRequest := NewResearchRequestEvent(researchCtx, subject, depth, kb)

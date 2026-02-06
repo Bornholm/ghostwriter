@@ -257,8 +257,10 @@ func (h *ResearchAgent) generateSearchQueries(ctx context.Context, subject strin
 		return nil, errors.WithStack(err)
 	}
 
+	additionalContext := ContextAdditionalContext(ctx, "")
+
 	// Create query generation prompt
-	userPrompt := h.createQueryGenerationPrompt(subject, existingContent, iteration)
+	userPrompt := h.createQueryGenerationPrompt(subject, existingContent, iteration, additionalContext)
 
 	// Create JSON schema for SearchQueriesResponse
 	queriesSchema := h.createSearchQueriesSchema()
@@ -511,7 +513,7 @@ func (h *ResearchAgent) isCommonWord(word string) bool {
 	return commonWords[word]
 }
 
-func (h *ResearchAgent) createQueryGenerationPrompt(subject string, existingContent []string, iteration int) string {
+func (h *ResearchAgent) createQueryGenerationPrompt(subject string, existingContent []string, iteration int, additionalContext string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Generate strategic search queries for comprehensive research.\n\n")
@@ -545,6 +547,12 @@ func (h *ResearchAgent) createQueryGenerationPrompt(subject string, existingCont
 	}
 
 	prompt.WriteString("\nProvide queries in the specified JSON format with rationale for each.")
+
+	if additionalContext != "" {
+		prompt.WriteString("**Additional Context:**\n\n")
+		prompt.WriteString(additionalContext)
+		prompt.WriteString("\n\n")
+	}
 
 	return prompt.String()
 }

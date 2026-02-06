@@ -8,7 +8,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/abadojack/whatlanggo v1.0.1
 	github.com/blevesearch/bleve/v2 v2.5.5
-	github.com/bornholm/genai v0.0.3
+	github.com/bornholm/genai v0.0.6
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/davecgh/go-spew v1.1.1
@@ -101,7 +101,7 @@ require (
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/quic-go/quic-go v0.39.0 // indirect
 	github.com/refraction-networking/utls v1.5.4 // indirect
-	github.com/revrost/go-openrouter v1.0.0 // indirect
+	github.com/revrost/go-openrouter v1.1.5 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
