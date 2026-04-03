@@ -16,15 +16,15 @@ func NewWebSearchTool(client search.Client) llm.Tool {
 		"execute a research on the web about a topic",
 		llm.NewJSONSchema().
 			RequiredProperty("topic", "the topic to research", "string"),
-		func(ctx context.Context, params map[string]any) (string, error) {
+		func(ctx context.Context, params map[string]any) (llm.ToolResult, error) {
 			topic, err := llm.ToolParam[string](params, "topic")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			results, err := client.Search(ctx, topic)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			var sb strings.Builder
@@ -37,7 +37,7 @@ func NewWebSearchTool(client search.Client) llm.Tool {
 				sb.WriteString(fmt.Sprintf("**Description**:\n%s\n\n", r.Description))
 			}
 
-			return sb.String(), nil
+			return llm.NewToolResult(sb.String()), nil
 		},
 	)
 }

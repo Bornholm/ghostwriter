@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 
@@ -38,6 +39,14 @@ type SearchQueriesResponse struct {
 	Focus   string        `json:"focus" jsonschema:"required,description=Main research focus for this batch"`
 }
 
+const (
+	researchMaxResultsPerQuery  = 5
+	researchContentMaxLength    = 10000
+	researchKeywordMinLength    = 3
+	researchKeywordMaxCount     = 10
+	researchKeywordMinFrequency = 2
+)
+
 // ResearchState tracks the research progress
 type ResearchState struct {
 	ProcessedURLs    map[string]bool
@@ -55,102 +64,18 @@ type ResearchAgent struct {
 	scraper      scraper.Scraper
 }
 
-// ResearchRequestEvent represents a request to conduct research
-type ResearchRequestEvent struct {
-	ctx           context.Context
-	id            agent.EventID
-	Subject       string         `json:"subject"`
-	Depth         ResearchDepth  `json:"depth"`
-	KnowledgeBase *KnowledgeBase `json:"knowledgeBase"`
-}
-
-// Context implements agent.Event
-func (e *ResearchRequestEvent) Context() context.Context {
-	return e.ctx
-}
-
-// ID implements agent.Event
-func (e *ResearchRequestEvent) ID() agent.EventID {
-	return e.id
-}
-
-// WithContext implements agent.Event
-func (e *ResearchRequestEvent) WithContext(ctx context.Context) agent.Event {
-	return &ResearchRequestEvent{
-		ctx:           ctx,
-		id:            e.id,
-		Subject:       e.Subject,
-		Depth:         e.Depth,
-		KnowledgeBase: e.KnowledgeBase,
-	}
-}
-
-// NewResearchRequestEvent creates a new research request event
-func NewResearchRequestEvent(ctx context.Context, subject string, depth ResearchDepth, kb *KnowledgeBase) *ResearchRequestEvent {
-	return &ResearchRequestEvent{
-		ctx:           ctx,
-		id:            agent.NewEventID(),
-		Subject:       subject,
-		Depth:         depth,
-		KnowledgeBase: kb,
-	}
-}
-
-// ResearchCompleteEvent represents completed research with knowledge base
-type ResearchCompleteEvent struct {
-	ctx     context.Context
-	id      agent.EventID
-	Subject string                 `json:"subject"`
-	KB      *KnowledgeBase         `json:"-"` // Don't serialize the knowledge base
-	Stats   map[string]interface{} `json:"stats"`
-}
-
-// Context implements agent.Event
-func (e *ResearchCompleteEvent) Context() context.Context {
-	return e.ctx
-}
-
-// ID implements agent.Event
-func (e *ResearchCompleteEvent) ID() agent.EventID {
-	return e.id
-}
-
-// WithContext implements agent.Event
-func (e *ResearchCompleteEvent) WithContext(ctx context.Context) agent.Event {
-	return &ResearchCompleteEvent{
-		ctx:     ctx,
-		id:      e.id,
-		Subject: e.Subject,
-		KB:      e.KB,
-		Stats:   e.Stats,
-	}
-}
-
-// NewResearchCompleteEvent creates a new research complete event
-func NewResearchCompleteEvent(ctx context.Context, subject string, kb *KnowledgeBase) *ResearchCompleteEvent {
-	return &ResearchCompleteEvent{
-		ctx:     ctx,
-		id:      agent.NewEventID(),
-		Subject: subject,
-		KB:      kb,
-		Stats:   kb.GetStats(),
-	}
-}
-
 // Handle implements agent.Handler for research requests
-func (h *ResearchAgent) Handle(input agent.Event, outputs chan agent.Event) error {
-	researchRequest, ok := input.(*ResearchRequestEvent)
-	if !ok {
-		return errors.Wrapf(agent.ErrNotSupported, "event type '%T' not supported by researcher", input)
+func (h *ResearchAgent) Handle(ctx context.Context, input agent.Input, emit agent.EmitFunc) error {
+	subject := ContextSubject(ctx, "")
+	if subject == "" {
+		subject = input.Message
 	}
 
-	ctx := input.Context()
-	subject := researchRequest.Subject
-	depth := researchRequest.Depth
-	kb := researchRequest.KnowledgeBase
+	depth := ContextResearchDepth(ctx, ResearchDeep)
 
-	if kb == nil {
-		return errors.New("missing knowledge base")
+	kb, ok := ContextKnowledgeBase(ctx)
+	if !ok {
+		return errors.New("knowledge base not found in context")
 	}
 
 	// Conduct research and populate knowledge base
@@ -158,15 +83,11 @@ func (h *ResearchAgent) Handle(input agent.Event, outputs chan agent.Event) erro
 		return errors.WithStack(err)
 	}
 
-	// Create and send research complete event
-	completeEvent := NewResearchCompleteEvent(ctx, subject, kb)
-	outputs <- completeEvent
-
-	return nil
+	return emit(agent.NewEvent(agent.EventTypeComplete, &agent.CompleteData{Message: "research complete"}))
 }
 
 // conductResearch performs structured research using the new approach
-func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, depth ResearchDepth, kb *KnowledgeBase) error {
+func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, depth ResearchDepth, kb KnowledgeBase) error {
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
 
@@ -210,11 +131,19 @@ func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, dep
 		// Generate search queries for this iteration
 		queries, err := h.generateSearchQueries(ctx, subject, state.ContentSummaries, state.CurrentIteration)
 		if err != nil {
+			if errors.Is(err, llm.ErrNoMessage) || errors.Is(err, llm.ErrUnavailable) {
+				slog.WarnContext(ctx, "query generation returned no response, stopping research early",
+					slog.Int("iteration", state.CurrentIteration),
+					slog.Int("collected", state.TotalArticles),
+					slog.Any("error", err),
+				)
+				break
+			}
 			return errors.WithStack(err)
 		}
 
 		// Execute search and scrape for each query
-		articles, err := h.executeSearchAndScrape(ctx, queries, state)
+		articles, err := h.executeSearchAndScrape(ctx, queries, state, kb)
 		if err != nil {
 			return errors.WithStack(err)
 		}
@@ -295,19 +224,21 @@ func (h *ResearchAgent) generateSearchQueries(ctx context.Context, subject strin
 }
 
 // executeSearchAndScrape executes searches and scrapes top 5 articles for each query
-func (h *ResearchAgent) executeSearchAndScrape(ctx context.Context, queries []SearchQuery, state *ResearchState) ([]ResearchDocument, error) {
+func (h *ResearchAgent) executeSearchAndScrape(ctx context.Context, queries []SearchQuery, state *ResearchState, kb KnowledgeBase) ([]ResearchDocument, error) {
 	var allArticles []ResearchDocument
+	var failedSearches, failedScrapes int
 
 	for _, query := range queries {
 		// Search for results
 		results, err := h.searchClient.Search(ctx, query.Query)
 		if err != nil {
-			// Log error but continue with other queries
+			failedSearches++
+			slog.WarnContext(ctx, "search query failed", slog.String("query", query.Query), slog.Any("error", err))
 			continue
 		}
 
-		// Take top 5 results (or fewer if less available)
-		maxResults := 5
+		// Take top N results (or fewer if less available)
+		maxResults := researchMaxResultsPerQuery
 		if len(results) < maxResults {
 			maxResults = len(results)
 		}
@@ -315,18 +246,33 @@ func (h *ResearchAgent) executeSearchAndScrape(ctx context.Context, queries []Se
 		for j := 0; j < maxResults; j++ {
 			result := results[j]
 
+			// Skip PDF links — they cause token-limit errors in the embedding pipeline
+			if strings.HasSuffix(strings.ToLower(strings.SplitN(result.URL, "?", 2)[0]), ".pdf") {
+				continue
+			}
+
 			// Check if URL already processed (deduplication)
 			normalizedURL := h.normalizeURL(result.URL)
 			if state.ProcessedURLs[normalizedURL] {
 				continue
 			}
 
+			// Check if already indexed in the KB (covers persistent backends like Corpus)
+			if kb.HasDocument(result.URL) || kb.HasDocument(normalizedURL) {
+				state.ProcessedURLs[normalizedURL] = true
+				continue
+			}
+
 			// Scrape the article
 			article, err := h.scrapeArticle(ctx, result)
 			if err != nil {
-				// Log error but continue with other articles
+				failedScrapes++
+				slog.WarnContext(ctx, "failed to scrape article", slog.String("url", result.URL), slog.Any("error", err))
 				continue
 			}
+
+			// Rank-based relevance: top result = 1.0, last result approaches 0.
+			article.Relevance = 1.0 - float64(j)/float64(maxResults)
 
 			// Mark URL as processed
 			state.ProcessedURLs[normalizedURL] = true
@@ -334,17 +280,34 @@ func (h *ResearchAgent) executeSearchAndScrape(ctx context.Context, queries []Se
 		}
 	}
 
+	if failedSearches > 0 || failedScrapes > 0 {
+		slog.InfoContext(ctx, "research iteration summary",
+			slog.Int("collected", len(allArticles)),
+			slog.Int("failed_searches", failedSearches),
+			slog.Int("failed_scrapes", failedScrapes),
+		)
+	}
+
 	return allArticles, nil
 }
 
 // addToKnowledgeBaseWithDeduplication adds articles to KB while preventing duplicates
-func (h *ResearchAgent) addToKnowledgeBaseWithDeduplication(ctx context.Context, articles []ResearchDocument, kb *KnowledgeBase, state *ResearchState) error {
+func (h *ResearchAgent) addToKnowledgeBaseWithDeduplication(ctx context.Context, articles []ResearchDocument, kb KnowledgeBase, state *ResearchState) error {
+	tracker := NewProgressTracker(ctx)
 	for _, article := range articles {
-		// Add to knowledge base
 		if err := kb.AddDocument(article); err != nil {
-			return errors.WithStack(err)
+			slog.WarnContext(ctx, "could not index document, skipping", slog.String("url", article.URL), slog.Any("error", err))
+			continue
 		}
 		state.TotalArticles++
+		step := fmt.Sprintf("Indexed: %s", article.URL)
+		if article.Title != "" {
+			step = fmt.Sprintf("Indexed: [%s] %s", article.Title, article.URL)
+		}
+		tracker.EmitSubProgress(PhaseResearching, step,
+			GetPhaseBaseProgress(PhaseResearching),
+			float64(state.TotalArticles)/float64(state.TargetArticles),
+			ResearchingWeight, nil)
 	}
 	return nil
 }
@@ -363,7 +326,7 @@ func (h *ResearchAgent) extractContentSummary(articles []ResearchDocument) strin
 
 	// Get most frequent keywords as themes
 	for keyword, count := range keywordCounts {
-		if count >= 2 { // Keyword appears in multiple articles
+		if count >= researchKeywordMinFrequency {
 			themes = append(themes, keyword)
 		}
 	}
@@ -424,8 +387,8 @@ func (h *ResearchAgent) scrapeArticle(ctx context.Context, result search.Result)
 	contentStr := strings.TrimSpace(markdown)
 
 	// Limit content size to prevent memory issues
-	if len(contentStr) > 10000 {
-		contentStr = contentStr[:10000] + "..."
+	if len(contentStr) > researchContentMaxLength {
+		contentStr = contentStr[:researchContentMaxLength] + "..."
 	}
 
 	// Extract keywords from title and description
@@ -437,7 +400,6 @@ func (h *ResearchAgent) scrapeArticle(ctx context.Context, result search.Result)
 		Content:    contentStr,
 		Keywords:   keywords,
 		SourceType: h.detectSourceType(result.URL),
-		Relevance:  0.8, // Default relevance, could be calculated based on content quality
 	}, nil
 }
 
@@ -485,14 +447,13 @@ func (h *ResearchAgent) extractKeywords(text string) []string {
 
 	for _, word := range words {
 		// Simple filtering - remove short words and common words
-		if len(word) > 3 && !h.isCommonWord(word) {
+		if len(word) > researchKeywordMinLength && !h.isCommonWord(word) {
 			keywords = append(keywords, word)
 		}
 	}
 
-	// Limit to 10 keywords
-	if len(keywords) > 10 {
-		keywords = keywords[:10]
+	if len(keywords) > researchKeywordMaxCount {
+		keywords = keywords[:researchKeywordMaxCount]
 	}
 
 	return keywords

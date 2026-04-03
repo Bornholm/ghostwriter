@@ -11,7 +11,7 @@ import (
 )
 
 // NewAddToKnowledgeBaseTool creates a tool for adding research documents to knowledge base
-func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
+func NewAddToKnowledgeBaseTool(kb KnowledgeBase) llm.Tool {
 	return llm.NewFuncTool(
 		"add_to_knowledge_base",
 		"Add a research document to the knowledge base for later use by other agents",
@@ -22,35 +22,35 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 			RequiredProperty("url", "source URL if available, empty string if not", "string").
 			RequiredProperty("keywords", "comma-separated list of relevant keywords", "string").
 			RequiredProperty("relevance", "relevance score from 0.0 to 1.0", "number"),
-		func(ctx context.Context, params map[string]any) (string, error) {
+		func(ctx context.Context, params map[string]any) (llm.ToolResult, error) {
 			url, err := llm.ToolParam[string](params, "url")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			title, err := llm.ToolParam[string](params, "title")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			content, err := llm.ToolParam[string](params, "content")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			sourceType, err := llm.ToolParam[string](params, "source_type")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			keywordsStr, err := llm.ToolParam[string](params, "keywords")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			relevance, err := llm.ToolParam[float64](params, "relevance")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			// Parse keywords from comma-separated string
@@ -63,6 +63,11 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 						keywords = append(keywords, trimmed)
 					}
 				}
+			}
+
+			if url != "" && kb.HasDocument(url) {
+				slog.DebugContext(ctx, "document already in knowledge base, skipping", slog.String("url", url))
+				return llm.NewToolResult(fmt.Sprintf("Document '%s' already exists in knowledge base", title)), nil
 			}
 
 			slog.DebugContext(ctx, "adding document to knowledge base", slog.String("url", url), slog.String("title", title))
@@ -80,25 +85,25 @@ func NewAddToKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 			// Add to knowledge base
 			err = kb.AddDocument(doc)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
-			return fmt.Sprintf("Successfully added research document '%s' to knowledge base (relevance: %.2f, type: %s)", title, relevance, sourceType), nil
+			return llm.NewToolResult(fmt.Sprintf("Successfully added research document '%s' to knowledge base (relevance: %.2f, type: %s)", title, relevance, sourceType)), nil
 		},
 	)
 }
 
 // NewSearchKnowledgeBaseTool creates a tool for full-text search
-func NewSearchKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
+func NewSearchKnowledgeBaseTool(kb KnowledgeBase) llm.Tool {
 	return llm.NewFuncTool(
 		"search_knowledge_base",
 		"Perform full-text search across all research documents",
 		llm.NewJSONSchema().
 			RequiredProperty("query", "search terms or keywords", "string"),
-		func(ctx context.Context, params map[string]any) (string, error) {
+		func(ctx context.Context, params map[string]any) (llm.ToolResult, error) {
 			query, err := llm.ToolParam[string](params, "query")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			var results []ResearchDocument
@@ -108,10 +113,10 @@ func NewSearchKnowledgeBaseTool(kb *KnowledgeBase) llm.Tool {
 			// General search
 			results, err = kb.Search(query, 15)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
-			return formatSearchResults(results), nil
+			return llm.NewToolResult(formatSearchResults(results)), nil
 		},
 	)
 }

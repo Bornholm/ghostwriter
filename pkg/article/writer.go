@@ -3,11 +3,12 @@ package article
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/bornholm/genai/agent"
-	"github.com/bornholm/genai/agent/task"
+	"github.com/bornholm/genai/agent/loop"
 	"github.com/bornholm/genai/llm"
 	"github.com/bornholm/genai/llm/prompt"
 	"github.com/pkg/errors"
@@ -23,54 +24,32 @@ type WriterHandler struct {
 }
 
 // Handle implements agent.Handler for writing requests
-func (h *WriterHandler) Handle(input agent.Event, outputs chan agent.Event) error {
-	assignmentEvent, ok := input.(SectionAssignmentEvent)
+func (h *WriterHandler) Handle(ctx context.Context, input agent.Input, emit agent.EmitFunc) error {
+	section, ok := ContextDocumentSection(ctx)
 	if !ok {
-		return errors.Wrapf(agent.ErrNotSupported, "event type '%T' not supported by writer", input)
+		return errors.New("document section not found in context")
 	}
 
-	ctx := input.Context()
-	section := assignmentEvent.Section()
-	subject := assignmentEvent.Subject()
-	previousSection := assignmentEvent.PreviousSection()
-
-	// Get context values
-	agentRole := ContextAgentRole(ctx, RoleWriter)
-
-	if agentRole != RoleWriter {
-		return errors.New("writer handler can only process writer role events")
-	}
-
-	// Create writing context
-	writingCtx := WithContextSubject(ctx, subject)
-
-	// Pass through style guidelines if available
-	styleGuidelines := ContextStyleGuidelines(ctx, "")
-	if styleGuidelines != "" {
-		writingCtx = WithContextStyleGuidelines(writingCtx, styleGuidelines)
-	}
-
-	// Pass through additional context if available
-	additionalContext := ContextAdditionalContext(ctx, "")
-	if additionalContext != "" {
-		writingCtx = WithContextAdditionalContext(writingCtx, additionalContext)
-	}
+	subject := ContextSubject(ctx, "")
+	previousSection := ContextPreviousSectionContent(ctx)
 
 	// Write the section content using knowledge base
-	content, err := h.writeSection(writingCtx, section, subject, previousSection)
+	content, err := h.writeSection(ctx, section, subject, previousSection, emit)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
-	// Create and send the section content event
-	contentEvent := NewSectionContentEvent(ctx, content, assignmentEvent)
-	outputs <- contentEvent
+	// JSON-encode and emit result
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		return errors.WithStack(err)
+	}
 
-	return nil
+	return emit(agent.NewEvent(agent.EventTypeComplete, &agent.CompleteData{Message: string(contentJSON)}))
 }
 
-// writeSectionFromKnowledgeBase creates content using knowledge base queries
-func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSection, subject string, previousSection *SectionContent) (SectionContent, error) {
+// writeSection creates content using knowledge base queries
+func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSection, subject string, previousSection *SectionContent, emit agent.EmitFunc) (SectionContent, error) {
 	tracker := NewProgressTracker(ctx)
 
 	// Get knowledge base from context
@@ -86,7 +65,7 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 			"step":          "knowledge_query",
 		})
 
-	// Load the writer system prompt (updated version)
+	// Load the writer system prompt
 	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil)
 	if err != nil {
 		return SectionContent{}, errors.WithStack(err)
@@ -107,46 +86,41 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 			"step":          "content_writing",
 		})
 
-	// Set up task context for knowledge-based writing
-	taskCtx := task.WithContextMinIterations(ctx, 1) // Fewer iterations since research is done
-	taskCtx = task.WithContextMaxIterations(taskCtx, 3)
-	taskCtx = task.WithContextMaxToolIterations(taskCtx, 6)
-	taskCtx = agent.WithContextMessages(taskCtx, []llm.Message{
-		llm.NewMessage(llm.RoleSystem, systemPrompt),
-		llm.NewMessage(llm.RoleUser, userPrompt),
-	})
-	taskCtx = agent.WithContextTools(taskCtx, tools)
-
-	// Create task handler
-	taskHandler := task.NewHandler(h.client)
-	writerAgent := agent.New(taskHandler)
-
-	// Start the agent
-	if _, _, err := writerAgent.Start(taskCtx); err != nil {
-		return SectionContent{}, errors.WithStack(err)
-	}
-	defer writerAgent.Stop()
-
-	// Execute writing task
-	result, err := task.Do(taskCtx, writerAgent, userPrompt)
+	// Create loop handler for agentic writing
+	loopHandler, err := loop.NewHandler(
+		loop.WithClient(h.client),
+		loop.WithSystemPrompt(systemPrompt),
+		loop.WithTools(tools...),
+		loop.WithMaxIterations(3),
+	)
 	if err != nil {
 		return SectionContent{}, errors.WithStack(err)
 	}
 
-	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Processing content and extracting sources: %s", section.Title),
+	// Capture the written content from EventTypeComplete
+	var writtenContent string
+	innerEmit := func(evt agent.Event) error {
+		if evt.Type() == agent.EventTypeComplete {
+			writtenContent = evt.Data().(*agent.CompleteData).Message
+		}
+		return emit(evt)
+	}
+
+	if err := agent.NewRunner(loopHandler).Run(ctx, agent.NewInput(userPrompt), innerEmit); err != nil {
+		return SectionContent{}, errors.WithStack(err)
+	}
+
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Processing content: %s", section.Title),
 		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
 			"section_id":    section.ID,
 			"section_title": section.Title,
 			"step":          "content_processing",
 		})
 
-	content := result.Result()
-
-	// Create section content
-	wordCount := h.countWords(content)
+	wordCount := h.countWords(writtenContent)
 	sectionContent := SectionContent{
 		Title:     section.Title,
-		Content:   content,
+		Content:   writtenContent,
 		WordCount: wordCount,
 	}
 
@@ -201,6 +175,7 @@ func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSectio
 	prompt.WriteString("3. Write engaging, well-structured content based on the research data\n")
 	prompt.WriteString("4. Aim for the target word count\n")
 	prompt.WriteString("5. Use a professional yet accessible tone\n")
+	prompt.WriteString("6. Do NOT add a conclusion or closing paragraph at the end of the section\n")
 
 	if styleGuidelines != "" {
 		prompt.WriteString("7. Follow the provided style guidelines carefully\n\n")
@@ -208,6 +183,7 @@ func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSectio
 		prompt.WriteString("```\n")
 		prompt.WriteString(styleGuidelines)
 		prompt.WriteString("\n```\n\n")
+		prompt.WriteString("**CRITICAL**: Respect strictly the language specified in the style guidelines above. Write the ENTIRE section content in that language only. Never mix languages.\n\n")
 	}
 
 	if additionalContext != "" {
@@ -233,6 +209,128 @@ func (h *WriterHandler) createKnowledgeBasedSectionPrompt(section DocumentSectio
 	return prompt.String()
 }
 
+// reviseSection rewrites a section incorporating the reviewer's feedback.
+func (h *WriterHandler) reviseSection(ctx context.Context, section DocumentSection, subject string, previousSection *SectionContent, previousContent string, feedback string, round int, emit agent.EmitFunc) (SectionContent, error) {
+	tracker := NewProgressTracker(ctx)
+
+	kb, hasKB := ContextKnowledgeBase(ctx)
+	if !hasKB {
+		return SectionContent{}, errors.New("knowledge base not available in context")
+	}
+
+	tracker.EmitProgress(PhaseWriting, fmt.Sprintf("Revising section (round %d): %s", round, section.Title),
+		GetPhaseBaseProgress(PhaseWriting), map[string]interface{}{
+			"section_id":    section.ID,
+			"section_title": section.Title,
+			"round":         round,
+		})
+
+	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil)
+	if err != nil {
+		return SectionContent{}, errors.WithStack(err)
+	}
+
+	tools := append(h.tools, NewSearchKnowledgeBaseTool(kb))
+
+	styleGuidelines := ContextStyleGuidelines(ctx, "")
+	additionalContext := ContextAdditionalContext(ctx, "")
+	userPrompt := h.createRevisionPrompt(section, subject, styleGuidelines, additionalContext, previousSection, previousContent, feedback, round)
+
+	loopHandler, err := loop.NewHandler(
+		loop.WithClient(h.client),
+		loop.WithSystemPrompt(systemPrompt),
+		loop.WithTools(tools...),
+		loop.WithMaxIterations(3),
+	)
+	if err != nil {
+		return SectionContent{}, errors.WithStack(err)
+	}
+
+	var writtenContent string
+	innerEmit := func(evt agent.Event) error {
+		if evt.Type() == agent.EventTypeComplete {
+			writtenContent = evt.Data().(*agent.CompleteData).Message
+		}
+		return emit(evt)
+	}
+
+	if err := agent.NewRunner(loopHandler).Run(ctx, agent.NewInput(userPrompt), innerEmit); err != nil {
+		return SectionContent{}, errors.WithStack(err)
+	}
+
+	wordCount := h.countWords(writtenContent)
+	return SectionContent{
+		Title:     section.Title,
+		Content:   writtenContent,
+		WordCount: wordCount,
+	}, nil
+}
+
+// createRevisionPrompt builds the prompt for a revision round.
+func (h *WriterHandler) createRevisionPrompt(section DocumentSection, subject string, styleGuidelines string, additionalContext string, previousSection *SectionContent, previousContent string, feedback string, round int) string {
+	var p strings.Builder
+
+	p.WriteString(fmt.Sprintf("Revise this section based on the reviewer's feedback (revision round %d).\n\n", round))
+	p.WriteString("**Article subject:** ")
+	p.WriteString(subject)
+	p.WriteString("\n\n")
+
+	p.WriteString("**Section:**\n")
+	p.WriteString(fmt.Sprintf("- **Title:** %s\n", section.Title))
+	p.WriteString(fmt.Sprintf("- **Target word count:** %d words\n", section.WordCount))
+
+	if len(section.KeyPoints) > 0 {
+		p.WriteString("- **Key points to cover:**\n")
+		for _, kp := range section.KeyPoints {
+			p.WriteString(fmt.Sprintf("  - %s\n", kp))
+		}
+	}
+
+	p.WriteString(fmt.Sprintf("\n**Reviewer feedback (round %d):**\n", round))
+	p.WriteString(feedback)
+	p.WriteString("\n\n")
+
+	p.WriteString("**Previous version of the section (to revise):**\n\n")
+	p.WriteString(previousContent)
+	p.WriteString("\n\n")
+
+	p.WriteString("**Instructions:**\n")
+	p.WriteString("1. Address ALL points in the reviewer's feedback\n")
+	p.WriteString("2. Preserve content that the reviewer did not ask to change\n")
+	p.WriteString("3. Use the knowledge base to find supporting data if the reviewer requested more evidence\n")
+	p.WriteString("4. Do NOT add a conclusion paragraph at the end of the section\n")
+
+	if styleGuidelines != "" {
+		p.WriteString("5. Follow the provided style guidelines carefully\n\n")
+		p.WriteString("**Style guidelines:**\n```\n")
+		p.WriteString(styleGuidelines)
+		p.WriteString("\n```\n\n")
+		p.WriteString("**CRITICAL**: Write the ENTIRE section content in the language specified in the style guidelines. Never mix languages.\n\n")
+	}
+
+	if additionalContext != "" {
+		p.WriteString("**Additional context:**\n```\n")
+		p.WriteString(additionalContext)
+		p.WriteString("\n```\n\n")
+	}
+
+	if previousSection != nil {
+		p.WriteString("**Previous section (for continuity):**\n")
+		p.WriteString(fmt.Sprintf("- **Title:** %s\n", previousSection.Title))
+		prevWords := strings.Fields(previousSection.Content)
+		startIdx := len(prevWords) - 200
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		p.WriteString(strings.Join(prevWords[startIdx:], " "))
+		p.WriteString("\n\n")
+	}
+
+	p.WriteString("Output only the revised section content (no section title header).")
+
+	return p.String()
+}
+
 // countWords provides a simple word count
 func (h *WriterHandler) countWords(text string) int {
 	if text == "" {
@@ -242,7 +340,7 @@ func (h *WriterHandler) countWords(text string) int {
 	return len(words)
 }
 
-// NewWriterHandler creates a new writer handler (updated)
+// NewWriterHandler creates a new writer handler
 func NewWriterHandler(client llm.ChatCompletionClient, tools ...llm.Tool) *WriterHandler {
 	return &WriterHandler{
 		client: client,

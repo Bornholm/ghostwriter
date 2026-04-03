@@ -20,27 +20,27 @@ func NewScrapeWebpageTool(scraper scraper.Scraper) llm.Tool {
 		"scrape the given webpage url and returns its content as markdown",
 		llm.NewJSONSchema().
 			RequiredProperty("url", "the url of the webpage to scrape", "string"),
-		func(ctx context.Context, params map[string]any) (string, error) {
+		func(ctx context.Context, params map[string]any) (llm.ToolResult, error) {
 			url, err := llm.ToolParam[string](params, "url")
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			res, err := scraper.Get(ctx, url)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			defer res.Close()
 
 			doc, err := goquery.NewDocumentFromReader(res)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			html, err := doc.Find("body").Html()
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
 			conv := converter.NewConverter(
@@ -53,10 +53,10 @@ func NewScrapeWebpageTool(scraper scraper.Scraper) llm.Tool {
 
 			markdown, err := conv.ConvertString(html)
 			if err != nil {
-				return "", errors.WithStack(err)
+				return nil, errors.WithStack(err)
 			}
 
-			return strings.TrimSpace(markdown), nil
+			return llm.NewToolResult(strings.TrimSpace(markdown)), nil
 		},
 	)
 }

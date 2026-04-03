@@ -7,7 +7,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// ResearchDocument represents a single piece of research data
+// ResearchDocument represents a single piece of research data.
 type ResearchDocument struct {
 	URL        string   `json:"url"`
 	Title      string   `json:"title"`
@@ -17,15 +17,25 @@ type ResearchDocument struct {
 	Relevance  float64  `json:"relevance"`
 }
 
-// KnowledgeBase manages the centralized research data using Bleve
-type KnowledgeBase struct {
+// KnowledgeBase is the interface for storing and searching research documents.
+type KnowledgeBase interface {
+	AddDocument(doc ResearchDocument) error
+	HasDocument(url string) bool
+	Search(query string, limit int) ([]ResearchDocument, error)
+	GetAllDocuments() []ResearchDocument
+	GetStats() map[string]interface{}
+	Close() error
+}
+
+// BleveKnowledgeBase manages the centralized research data using Bleve.
+type BleveKnowledgeBase struct {
 	index     bleve.Index
 	documents map[string]ResearchDocument
 	mutex     sync.RWMutex
 }
 
-// NewKnowledgeBase creates a new in-memory knowledge base
-func NewKnowledgeBase() (*KnowledgeBase, error) {
+// NewKnowledgeBase creates a new in-memory Bleve-backed knowledge base.
+func NewKnowledgeBase() (KnowledgeBase, error) {
 	// Create index mapping
 	indexMapping := bleve.NewIndexMapping()
 	indexMapping.DefaultAnalyzer = AnalyzerDynamicLang
@@ -76,21 +86,27 @@ func NewKnowledgeBase() (*KnowledgeBase, error) {
 		return nil, errors.WithStack(err)
 	}
 
-	return &KnowledgeBase{
+	return &BleveKnowledgeBase{
 		index:     index,
 		documents: make(map[string]ResearchDocument),
 	}, nil
 }
 
-// AddDocument adds a research document to the knowledge base
-func (kb *KnowledgeBase) AddDocument(doc ResearchDocument) error {
+// HasDocument reports whether a document with the given URL is already indexed.
+func (kb *BleveKnowledgeBase) HasDocument(url string) bool {
+	kb.mutex.RLock()
+	defer kb.mutex.RUnlock()
+	_, exists := kb.documents[url]
+	return exists
+}
+
+// AddDocument adds a research document to the knowledge base.
+func (kb *BleveKnowledgeBase) AddDocument(doc ResearchDocument) error {
 	kb.mutex.Lock()
 	defer kb.mutex.Unlock()
 
-	// Store in map for quick access
 	kb.documents[doc.URL] = doc
 
-	// Index in Bleve for search
 	err := kb.index.Index(doc.URL, doc)
 	if err != nil {
 		return errors.WithStack(err)
@@ -99,8 +115,8 @@ func (kb *KnowledgeBase) AddDocument(doc ResearchDocument) error {
 	return nil
 }
 
-// Search performs full-text search across all documents
-func (kb *KnowledgeBase) Search(query string, limit int) ([]ResearchDocument, error) {
+// Search performs full-text search across all documents.
+func (kb *BleveKnowledgeBase) Search(query string, limit int) ([]ResearchDocument, error) {
 	kb.mutex.RLock()
 	defer kb.mutex.RUnlock()
 
@@ -124,8 +140,8 @@ func (kb *KnowledgeBase) Search(query string, limit int) ([]ResearchDocument, er
 	return results, nil
 }
 
-// GetAllDocuments returns all documents in the knowledge base
-func (kb *KnowledgeBase) GetAllDocuments() []ResearchDocument {
+// GetAllDocuments returns all documents in the knowledge base.
+func (kb *BleveKnowledgeBase) GetAllDocuments() []ResearchDocument {
 	kb.mutex.RLock()
 	defer kb.mutex.RUnlock()
 
@@ -137,15 +153,14 @@ func (kb *KnowledgeBase) GetAllDocuments() []ResearchDocument {
 	return docs
 }
 
-// GetStats returns statistics about the knowledge base
-func (kb *KnowledgeBase) GetStats() map[string]interface{} {
+// GetStats returns statistics about the knowledge base.
+func (kb *BleveKnowledgeBase) GetStats() map[string]interface{} {
 	kb.mutex.RLock()
 	defer kb.mutex.RUnlock()
 
 	stats := make(map[string]interface{})
 	stats["total_documents"] = len(kb.documents)
 
-	// Count by source type
 	sourceTypeCounts := make(map[string]int)
 	for _, doc := range kb.documents {
 		sourceTypeCounts[doc.SourceType]++
@@ -155,8 +170,8 @@ func (kb *KnowledgeBase) GetStats() map[string]interface{} {
 	return stats
 }
 
-// Close closes the knowledge base and releases resources
-func (kb *KnowledgeBase) Close() error {
+// Close closes the knowledge base and releases resources.
+func (kb *BleveKnowledgeBase) Close() error {
 	kb.mutex.Lock()
 	defer kb.mutex.Unlock()
 

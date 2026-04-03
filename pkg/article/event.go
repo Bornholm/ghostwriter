@@ -3,8 +3,6 @@ package article
 import (
 	"context"
 	"time"
-
-	"github.com/bornholm/genai/agent"
 )
 
 // DocumentSection represents a section in the article plan
@@ -55,248 +53,11 @@ type Source struct {
 	Relevance  float64  `json:"relevance"`
 }
 
-// DocumentPlanEvent carries the article plan from planner to orchestrator
-type DocumentPlanEvent interface {
-	agent.MessageEvent
-	Plan() DocumentPlan
-	Subject() string
-	Origin() agent.MessageEvent
-}
-
-type BaseDocumentPlanEvent struct {
-	id      agent.EventID
-	ctx     context.Context
-	plan    DocumentPlan
-	subject string
-	origin  agent.MessageEvent
-}
-
-// ID implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) ID() agent.EventID {
-	return e.id
-}
-
-// Context implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) Context() context.Context {
-	return e.ctx
-}
-
-// WithContext implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) WithContext(ctx context.Context) agent.Event {
-	return &BaseDocumentPlanEvent{
-		id:      e.id,
-		ctx:     ctx,
-		plan:    e.plan,
-		subject: e.subject,
-		origin:  e.origin,
-	}
-}
-
-// Message implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) Message() string {
-	return "Document plan created for: " + e.subject
-}
-
-// Plan implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) Plan() DocumentPlan {
-	return e.plan
-}
-
-// Subject implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) Subject() string {
-	return e.subject
-}
-
-// Origin implements DocumentPlanEvent.
-func (e *BaseDocumentPlanEvent) Origin() agent.MessageEvent {
-	return e.origin
-}
-
-var _ DocumentPlanEvent = &BaseDocumentPlanEvent{}
-
-// NewDocumentPlanEvent creates a new document plan event
-func NewDocumentPlanEvent(ctx context.Context, plan DocumentPlan, subject string, origin agent.MessageEvent) *BaseDocumentPlanEvent {
-	return &BaseDocumentPlanEvent{
-		id:      agent.NewEventID(),
-		ctx:     ctx,
-		plan:    plan,
-		subject: subject,
-		origin:  origin,
-	}
-}
-
-// SectionAssignmentEvent assigns a section to a writer agent
-type SectionAssignmentEvent interface {
-	agent.MessageEvent
-	Section() DocumentSection
-	Subject() string
-	Context() context.Context
-	Origin() agent.MessageEvent
-	PreviousSection() *SectionContent
-}
-
-type BaseSectionAssignmentEvent struct {
-	id              agent.EventID
-	ctx             context.Context
-	section         DocumentSection
-	previousSection *SectionContent
-	subject         string
-	origin          agent.MessageEvent
-}
-
-// ID implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) ID() agent.EventID {
-	return e.id
-}
-
-// Context implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) Context() context.Context {
-	return e.ctx
-}
-
-// WithContext implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) WithContext(ctx context.Context) agent.Event {
-	return &BaseSectionAssignmentEvent{
-		id:      e.id,
-		ctx:     ctx,
-		section: e.section,
-		subject: e.subject,
-		origin:  e.origin,
-	}
-}
-
-// Message implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) Message() string {
-	return "Write section: " + e.section.Title
-}
-
-// Section implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) Section() DocumentSection {
-	return e.section
-}
-
-// Subject implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) Subject() string {
-	return e.subject
-}
-
-// Origin implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) Origin() agent.MessageEvent {
-	return e.origin
-}
-
-// PreviousSection implements SectionAssignmentEvent.
-func (e *BaseSectionAssignmentEvent) PreviousSection() *SectionContent {
-	return e.previousSection
-}
-
-var _ SectionAssignmentEvent = &BaseSectionAssignmentEvent{}
-
-// NewSectionAssignmentEvent creates a new section assignment event
-func NewSectionAssignmentEvent(ctx context.Context, section DocumentSection, subject string, origin agent.MessageEvent, previousSectionContent *SectionContent) *BaseSectionAssignmentEvent {
-	return &BaseSectionAssignmentEvent{
-		id:              agent.NewEventID(),
-		ctx:             ctx,
-		section:         section,
-		subject:         subject,
-		origin:          origin,
-		previousSection: previousSectionContent,
-	}
-}
-
-// SectionContentEvent carries completed section content
-type SectionContentEvent interface {
-	agent.MessageEvent
-	Content() SectionContent
-	Origin() agent.MessageEvent
-}
-
-type BaseSectionContentEvent struct {
-	id      agent.EventID
-	ctx     context.Context
-	content SectionContent
-	origin  agent.MessageEvent
-}
-
-// ID implements SectionContentEvent.
-func (e *BaseSectionContentEvent) ID() agent.EventID {
-	return e.id
-}
-
-// Context implements SectionContentEvent.
-func (e *BaseSectionContentEvent) Context() context.Context {
-	return e.ctx
-}
-
-// WithContext implements SectionContentEvent.
-func (e *BaseSectionContentEvent) WithContext(ctx context.Context) agent.Event {
-	return &BaseSectionContentEvent{
-		id:      e.id,
-		ctx:     ctx,
-		content: e.content,
-		origin:  e.origin,
-	}
-}
-
-// Message implements SectionContentEvent.
-func (e *BaseSectionContentEvent) Message() string {
-	return "Section completed: " + e.content.Title
-}
-
-// Content implements SectionContentEvent.
-func (e *BaseSectionContentEvent) Content() SectionContent {
-	return e.content
-}
-
-// Origin implements SectionContentEvent.
-func (e *BaseSectionContentEvent) Origin() agent.MessageEvent {
-	return e.origin
-}
-
-var _ SectionContentEvent = &BaseSectionContentEvent{}
-
-// NewSectionContentEvent creates a new section content event
-func NewSectionContentEvent(ctx context.Context, content SectionContent, origin agent.MessageEvent) *BaseSectionContentEvent {
-	return &BaseSectionContentEvent{
-		id:      agent.NewEventID(),
-		ctx:     ctx,
-		content: content,
-		origin:  origin,
-	}
-}
-
-// FinalArticleEvent carries the completed, edited article
-type FinalArticleEvent interface {
-	agent.MessageEvent
-	Article() Document
-	Origin() agent.Event
-}
-
-type BaseFinalArticleEvent struct {
-	id      agent.EventID
-	ctx     context.Context
-	article Document
-	origin  agent.Event
-}
-
-// ID implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) ID() agent.EventID {
-	return e.id
-}
-
-// Context implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) Context() context.Context {
-	return e.ctx
-}
-
-// WithContext implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) WithContext(ctx context.Context) agent.Event {
-	return &BaseFinalArticleEvent{
-		id:      e.id,
-		ctx:     ctx,
-		article: e.article,
-		origin:  e.origin,
-	}
+// SectionReview is the result returned by the reviewer agent for a section
+type SectionReview struct {
+	Approved bool   `json:"approved"`
+	Content  string `json:"content"`  // set when Approved=true, contains polished content
+	Feedback string `json:"feedback"` // set when Approved=false, contains revision instructions
 }
 
 // ProgressPhase represents the current phase of article generation
@@ -304,17 +65,17 @@ type ProgressPhase string
 
 const (
 	PhaseInitializing ProgressPhase = "initializing"
-	PhaseResearching  ProgressPhase = "researching" // NEW
+	PhaseResearching  ProgressPhase = "researching"
 	PhasePlanning     ProgressPhase = "planning"
 	PhaseWriting      ProgressPhase = "writing"
-	PhaseEditing      ProgressPhase = "editing"
-	PhaseAttributing  ProgressPhase = "attributing" // NEW
+	PhaseReviewing    ProgressPhase = "reviewing"
+	PhaseEditing      ProgressPhase = "editing" // kept for progress.go compat, will be removed with old editor
+	PhaseAttributing  ProgressPhase = "attributing"
 	PhaseCompleted    ProgressPhase = "completed"
 )
 
 // ProgressEvent carries progress information during article generation
 type ProgressEvent interface {
-	agent.Event
 	Phase() ProgressPhase
 	Step() string
 	Progress() float64 // 0.0 to 1.0
@@ -324,7 +85,6 @@ type ProgressEvent interface {
 }
 
 type BaseProgressEvent struct {
-	id                     agent.EventID
 	ctx                    context.Context
 	phase                  ProgressPhase
 	step                   string
@@ -332,30 +92,6 @@ type BaseProgressEvent struct {
 	elapsedTime            time.Duration
 	estimatedTimeRemaining time.Duration
 	details                map[string]interface{}
-}
-
-// ID implements ProgressEvent.
-func (e *BaseProgressEvent) ID() agent.EventID {
-	return e.id
-}
-
-// Context implements ProgressEvent.
-func (e *BaseProgressEvent) Context() context.Context {
-	return e.ctx
-}
-
-// WithContext implements ProgressEvent.
-func (e *BaseProgressEvent) WithContext(ctx context.Context) agent.Event {
-	return &BaseProgressEvent{
-		id:                     e.id,
-		ctx:                    ctx,
-		phase:                  e.phase,
-		step:                   e.step,
-		progress:               e.progress,
-		elapsedTime:            e.elapsedTime,
-		estimatedTimeRemaining: e.estimatedTimeRemaining,
-		details:                e.details,
-	}
 }
 
 // Phase implements ProgressEvent.
@@ -397,7 +133,6 @@ func NewProgressEvent(ctx context.Context, phase ProgressPhase, step string, pro
 	}
 
 	return &BaseProgressEvent{
-		id:                     agent.NewEventID(),
 		ctx:                    ctx,
 		phase:                  phase,
 		step:                   step,
@@ -405,32 +140,5 @@ func NewProgressEvent(ctx context.Context, phase ProgressPhase, step string, pro
 		elapsedTime:            elapsedTime,
 		estimatedTimeRemaining: estimatedTimeRemaining,
 		details:                details,
-	}
-}
-
-// Message implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) Message() string {
-	return "Article completed: " + e.article.Title
-}
-
-// Article implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) Article() Document {
-	return e.article
-}
-
-// Origin implements FinalArticleEvent.
-func (e *BaseFinalArticleEvent) Origin() agent.Event {
-	return e.origin
-}
-
-var _ FinalArticleEvent = &BaseFinalArticleEvent{}
-
-// NewFinalArticleEvent creates a new final article event
-func NewFinalArticleEvent(ctx context.Context, article Document, origin agent.Event) *BaseFinalArticleEvent {
-	return &BaseFinalArticleEvent{
-		id:      agent.NewEventID(),
-		ctx:     ctx,
-		article: article,
-		origin:  origin,
 	}
 }

@@ -7,16 +7,20 @@ import (
 )
 
 const (
-	ContextKeyDocumentPlan      agent.ContextKey = "article_document_plan"
-	ContextKeySubject           agent.ContextKey = "article_subject"
-	ContextKeyTargetWordCount   agent.ContextKey = "article_target_word_count"
-	ContextKeyResearchDepth     agent.ContextKey = "article_research_depth"
-	ContextKeyAgentRole         agent.ContextKey = "article_agent_role"
-	ContextKeyStyleGuidelines   agent.ContextKey = "article_style_guidelines"
-	ContextKeyAdditionalContext agent.ContextKey = "article_additional_context"
-	ContextKeyKnowledgeBase     agent.ContextKey = "article_knowledge_base"     // NEW
-	ContextKeyResearchComplete  agent.ContextKey = "article_research_complete"  // NEW
-	ContextKeySourceAttribution agent.ContextKey = "article_source_attribution" // NEW
+	ContextKeyDocumentPlan          agent.ContextKey = "article_document_plan"
+	ContextKeySubject               agent.ContextKey = "article_subject"
+	ContextKeyTargetWordCount       agent.ContextKey = "article_target_word_count"
+	ContextKeyResearchDepth         agent.ContextKey = "article_research_depth"
+	ContextKeyAgentRole             agent.ContextKey = "article_agent_role"
+	ContextKeyStyleGuidelines       agent.ContextKey = "article_style_guidelines"
+	ContextKeyAdditionalContext     agent.ContextKey = "article_additional_context"
+	ContextKeyKnowledgeBase         agent.ContextKey = "article_knowledge_base"
+	ContextKeyResearchComplete      agent.ContextKey = "article_research_complete"
+	ContextKeySourceAttribution     agent.ContextKey = "article_source_attribution"
+	ContextKeyDocumentSection       agent.ContextKey = "article_document_section"
+	ContextKeyPreviousSectionContent agent.ContextKey = "article_previous_section_content"
+	ContextKeyDocumentSections      agent.ContextKey = "article_document_sections"
+	ContextKeyDocumentDraft         agent.ContextKey = "article_document_draft"
 )
 
 // AgentRole defines the role of an agent in the article writing process
@@ -112,13 +116,13 @@ func ContextAdditionalContext(ctx context.Context, defaultContext string) string
 }
 
 // WithContextKnowledgeBase adds knowledge base to context
-func WithContextKnowledgeBase(ctx context.Context, kb *KnowledgeBase) context.Context {
+func WithContextKnowledgeBase(ctx context.Context, kb KnowledgeBase) context.Context {
 	return context.WithValue(ctx, ContextKeyKnowledgeBase, kb)
 }
 
 // ContextKnowledgeBase retrieves knowledge base from context
-func ContextKnowledgeBase(ctx context.Context) (*KnowledgeBase, bool) {
-	kb, ok := ctx.Value(ContextKeyKnowledgeBase).(*KnowledgeBase)
+func ContextKnowledgeBase(ctx context.Context) (KnowledgeBase, bool) {
+	kb, ok := ctx.Value(ContextKeyKnowledgeBase).(KnowledgeBase)
 	return kb, ok
 }
 
@@ -131,4 +135,48 @@ func WithContextResearchComplete(ctx context.Context, complete bool) context.Con
 func ContextResearchComplete(ctx context.Context) bool {
 	complete, ok := ctx.Value(ContextKeyResearchComplete).(bool)
 	return ok && complete
+}
+
+// WithContextDocumentSection adds the current document section to context
+func WithContextDocumentSection(ctx context.Context, section DocumentSection) context.Context {
+	return context.WithValue(ctx, ContextKeyDocumentSection, section)
+}
+
+// ContextDocumentSection retrieves the current document section from context
+func ContextDocumentSection(ctx context.Context) (DocumentSection, bool) {
+	section, ok := ctx.Value(ContextKeyDocumentSection).(DocumentSection)
+	return section, ok
+}
+
+// WithContextPreviousSectionContent adds the previous section content to context
+func WithContextPreviousSectionContent(ctx context.Context, section *SectionContent) context.Context {
+	return context.WithValue(ctx, ContextKeyPreviousSectionContent, section)
+}
+
+// ContextPreviousSectionContent retrieves the previous section content from context
+func ContextPreviousSectionContent(ctx context.Context) *SectionContent {
+	section, _ := ctx.Value(ContextKeyPreviousSectionContent).(*SectionContent)
+	return section
+}
+
+// WithContextDocumentSections adds all document sections to context
+func WithContextDocumentSections(ctx context.Context, sections []SectionContent) context.Context {
+	return context.WithValue(ctx, ContextKeyDocumentSections, sections)
+}
+
+// ContextDocumentSections retrieves all document sections from context
+func ContextDocumentSections(ctx context.Context) ([]SectionContent, bool) {
+	sections, ok := ctx.Value(ContextKeyDocumentSections).([]SectionContent)
+	return sections, ok
+}
+
+// WithContextDocumentDraft adds the assembled markdown draft to context (sections validated so far)
+func WithContextDocumentDraft(ctx context.Context, draft string) context.Context {
+	return context.WithValue(ctx, ContextKeyDocumentDraft, draft)
+}
+
+// ContextDocumentDraft retrieves the assembled markdown draft from context
+func ContextDocumentDraft(ctx context.Context) string {
+	draft, _ := ctx.Value(ContextKeyDocumentDraft).(string)
+	return draft
 }

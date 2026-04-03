@@ -3,6 +3,7 @@ package article
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -23,50 +24,27 @@ type PlannerHandler struct {
 }
 
 // Handle implements agent.Handler for planning requests
-func (h *PlannerHandler) Handle(input agent.Event, outputs chan agent.Event) error {
-	messageEvent, ok := input.(agent.MessageEvent)
-	if !ok {
-		return errors.Wrapf(agent.ErrNotSupported, "event type '%T' not supported by planner", input)
+func (h *PlannerHandler) Handle(ctx context.Context, input agent.Input, emit agent.EmitFunc) error {
+	subject := input.Message
+	if subject == "" {
+		subject = ContextSubject(ctx, "")
 	}
 
-	ctx := input.Context()
-	subject := messageEvent.Message()
-
-	// Get context values
 	targetWordCount := ContextTargetWordCount(ctx, 1500)
-	agentRole := ContextAgentRole(ctx, RolePlanner)
-
-	if agentRole != RolePlanner {
-		return errors.New("planner handler can only process planner role events")
-	}
-
-	// Create planning context
-	planningCtx := WithContextSubject(ctx, subject)
-	planningCtx = WithContextTargetWordCount(planningCtx, targetWordCount)
-
-	// Pass through style guidelines if available
-	styleGuidelines := ContextStyleGuidelines(ctx, "")
-	if styleGuidelines != "" {
-		planningCtx = WithContextStyleGuidelines(planningCtx, styleGuidelines)
-	}
-
-	// Pass through additional context if available
-	additionalContext := ContextAdditionalContext(ctx, "")
-	if additionalContext != "" {
-		planningCtx = WithContextAdditionalContext(planningCtx, additionalContext)
-	}
 
 	// Generate the document plan using knowledge base
-	plan, err := h.generatePlan(planningCtx, subject, targetWordCount)
+	plan, err := h.generatePlan(ctx, subject, targetWordCount)
 	if err != nil {
 		return errors.WithStack(err)
 	}
 
-	// Create and send the document plan event
-	planEvent := NewDocumentPlanEvent(ctx, plan, subject, messageEvent)
-	outputs <- planEvent
+	// JSON-encode the plan and emit as CompleteData
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		return errors.WithStack(err)
+	}
 
-	return nil
+	return emit(agent.NewEvent(agent.EventTypeComplete, &agent.CompleteData{Message: string(planJSON)}))
 }
 
 // generatePlan creates a document plan using existing research
@@ -146,7 +124,7 @@ func (h *PlannerHandler) generatePlan(ctx context.Context, subject string, targe
 }
 
 // createPlanningPrompt creates planning prompt
-func (h *PlannerHandler) createPlanningPrompt(subject string, targetWordCount int, kb *KnowledgeBase, styleGuidelines string, additionalContext string) string {
+func (h *PlannerHandler) createPlanningPrompt(subject string, targetWordCount int, kb KnowledgeBase, styleGuidelines string, additionalContext string) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("Create a comprehensive document plan based on the research data provided below.\n\n")

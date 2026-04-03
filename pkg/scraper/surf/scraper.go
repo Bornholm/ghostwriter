@@ -42,7 +42,7 @@ func (s *Scraper) getClient() *surf.Client {
 		Builder()
 
 	if proxy := os.Getenv("HTTP_PROXY"); proxy != "" {
-		builder = builder.Proxy(proxy)
+		builder = builder.Proxy(g.String(proxy))
 	}
 
 	builder = builder.Impersonate().RandomOS().Chrome().
@@ -50,7 +50,7 @@ func (s *Scraper) getClient() *surf.Client {
 		Retry(3, 2).
 		Session()
 
-	return builder.Build()
+	return builder.Build().Unwrap()
 }
 
 func NewScraper() *Scraper {
