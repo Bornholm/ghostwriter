@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/bornholm/genai/agent"
 	"github.com/bornholm/genai/llm"
@@ -103,11 +106,13 @@ func WithMaxReviewRounds(n int) OrchestratorOptionFunc {
 
 // Orchestrator coordinates the white paper writing pipeline.
 type Orchestrator struct {
-	researcher     *article.ResearchAgent
-	planner        *PlannerHandler
-	chapterWriter  *ChapterWriterHandler
-	chapterEditor  *ChapterEditorHandler
+	researcher      *article.ResearchAgent
+	planner         *PlannerHandler
+	chapterWriter   *ChapterWriterHandler
+	chapterEditor   *ChapterEditorHandler
 	coherenceEditor *CoherenceEditorHandler
+	citationLinker  *CitationLinkerHandler
+	diagramInserter *DiagramInserterHandler
 }
 
 // WriteWhitePaper orchestrates the full pipeline.
@@ -160,6 +165,12 @@ func (o *Orchestrator) WriteWhitePaper(ctx context.Context, subject string, emit
 	coherence, err := o.coherencePass(ctx, plan, chapters, emit)
 	if err != nil {
 		return WhitePaper{}, errors.Wrap(err, "coherence phase failed")
+	}
+
+	// Step 4b: Enrichment pass (citation linking + Mermaid diagrams)
+	chapters, err = o.enrichChapters(ctx, chapters, emit)
+	if err != nil {
+		return WhitePaper{}, errors.Wrap(err, "enrichment phase failed")
 	}
 
 	// Step 5: Collect sources
@@ -398,6 +409,16 @@ func (o *Orchestrator) writeAndEditChapters(ctx context.Context, plan WhitePaper
 func (o *Orchestrator) coherencePass(ctx context.Context, plan WhitePaperPlan, chapters []ChapterContent, emit agent.EmitFunc) (CoherenceEditResult, error) {
 	_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{Name: "Cohérence"}))
 
+	emitInfo := func(msg string) {
+		_ = emit(agent.NewEvent(agent.EventTypeTextDelta, &agent.TextDeltaData{Delta: msg}))
+	}
+
+	emitInfo(fmt.Sprintf("  %d chapitres à analyser :\n", len(chapters)))
+	for _, ch := range chapters {
+		emitInfo(fmt.Sprintf("  — Chapitre %d : %s\n", ch.Number, ch.Title))
+	}
+	emitInfo("  Génération de l'abstract, du résumé exécutif et de la bibliographie…\n")
+
 	cohCtx := withCtxAllChapters(ctx, chapters)
 	cohCtx = withCtxPlan(cohCtx, plan)
 
@@ -428,6 +449,96 @@ func (o *Orchestrator) coherencePass(ctx context.Context, plan WhitePaperPlan, c
 	return result, nil
 }
 
+func (o *Orchestrator) enrichChapters(ctx context.Context, chapters []ChapterContent, emit agent.EmitFunc) ([]ChapterContent, error) {
+	_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{Name: "Enrichissement"}))
+
+	enriched := make([]ChapterContent, len(chapters))
+	copy(enriched, chapters)
+
+	for i, ch := range enriched {
+		select {
+		case <-ctx.Done():
+			return nil, errors.WithStack(ctx.Err())
+		default:
+		}
+
+		_ = emit(agent.NewEvent(EventTypeChapterStart, &ChapterStartData{
+			Number: ch.Number,
+			Total:  len(enriched),
+			Title:  ch.Title,
+			Target: ch.WordCount,
+		}))
+
+		// Pass 1: citation linking
+		chapter := &Chapter{
+			ID:     ch.ChapterID,
+			Number: FlexInt(ch.Number),
+			Title:  ch.Title,
+		}
+		citCtx := withCtxChapter(ctx, chapter)
+		citCtx = withCtxAllChapters(citCtx, enriched)
+
+		var linkedContent string
+		citEmit := func(evt agent.Event) error {
+			switch evt.Type() {
+			case agent.EventTypeTextDelta:
+				return nil
+			case agent.EventTypeComplete:
+				linkedContent = strings.TrimSpace(evt.Data().(*agent.CompleteData).Message)
+				return nil
+			}
+			return emit(evt)
+		}
+
+		if err := agent.NewRunner(o.citationLinker).Run(citCtx, agent.NewInput(ch.Content), citEmit); err != nil {
+			return nil, errors.Wrapf(err, "citation linking failed for chapter %q", ch.Title)
+		}
+		if linkedContent != "" {
+			enriched[i].Content = linkedContent
+			enriched[i].WordCount = countWords(linkedContent)
+		}
+
+		// Pass 2: diagram insertion (ctxAllChapters contains citation-enriched content up to i)
+		diagCtx := withCtxChapter(ctx, chapter)
+		diagCtx = withCtxAllChapters(diagCtx, enriched)
+
+		var diagContent string
+		diagEmit := func(evt agent.Event) error {
+			switch evt.Type() {
+			case agent.EventTypeTextDelta:
+				return nil
+			case agent.EventTypeComplete:
+				diagContent = strings.TrimSpace(evt.Data().(*agent.CompleteData).Message)
+				return nil
+			}
+			return emit(evt)
+		}
+
+		if err := agent.NewRunner(o.diagramInserter).Run(diagCtx, agent.NewInput(enriched[i].Content), diagEmit); err != nil {
+			return nil, errors.Wrapf(err, "diagram insertion failed for chapter %q", ch.Title)
+		}
+		if diagContent != "" {
+			enriched[i].Content = diagContent
+			enriched[i].WordCount = countWords(diagContent)
+		}
+
+		_ = emit(agent.NewEvent(EventTypeChapterDone, &ChapterDoneData{
+			Number:    enriched[i].Number,
+			Total:     len(enriched),
+			Title:     enriched[i].Title,
+			WordCount: enriched[i].WordCount,
+		}))
+	}
+
+	_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{
+		Name: "Enrichissement",
+		Done: true,
+		Info: fmt.Sprintf("%d chapitres enrichis", len(enriched)),
+	}))
+
+	return enriched, nil
+}
+
 // NewOrchestrator creates a new white paper orchestrator.
 func NewOrchestrator(client llm.Client) *Orchestrator {
 	scraper := surf.NewScraper()
@@ -439,6 +550,8 @@ func NewOrchestrator(client llm.Client) *Orchestrator {
 		chapterWriter:   NewChapterWriterHandler(client),
 		chapterEditor:   NewChapterEditorHandler(client),
 		coherenceEditor: NewCoherenceEditorHandler(client),
+		citationLinker:  NewCitationLinkerHandler(client),
+		diagramInserter: NewDiagramInserterHandler(client),
 	}
 }
 
@@ -446,4 +559,246 @@ func NewOrchestrator(client llm.Client) *Orchestrator {
 func WriteWhitePaper(ctx context.Context, client llm.Client, subject string, emit agent.EmitFunc, optFuncs ...OrchestratorOptionFunc) (WhitePaper, error) {
 	o := NewOrchestrator(client)
 	return o.WriteWhitePaper(ctx, subject, emit, optFuncs...)
+}
+
+// FixOptions configures the fix pipeline.
+type FixOptions struct {
+	InputDir          string
+	StyleGuidelines   string
+	AdditionalContext string
+	KnowledgeBase     article.KnowledgeBase
+	ForceEnrichment   bool
+}
+
+// FixOptionFunc configures FixOptions.
+type FixOptionFunc func(*FixOptions)
+
+// FixResult is the outcome of a fix run.
+type FixResult struct {
+	FixedFiles   []string
+	SkippedFiles []string
+}
+
+func WithFixInputDir(dir string) FixOptionFunc {
+	return func(o *FixOptions) { o.InputDir = dir }
+}
+
+func WithFixStyleGuidelines(s string) FixOptionFunc {
+	return func(o *FixOptions) { o.StyleGuidelines = s }
+}
+
+func WithFixAdditionalContext(s string) FixOptionFunc {
+	return func(o *FixOptions) { o.AdditionalContext = s }
+}
+
+func WithFixKnowledgeBase(kb article.KnowledgeBase) FixOptionFunc {
+	return func(o *FixOptions) { o.KnowledgeBase = kb }
+}
+
+func WithFixForceEnrichment(v bool) FixOptionFunc {
+	return func(o *FixOptions) { o.ForceEnrichment = v }
+}
+
+// FixWhitePaper applies > EDITOR: annotations found in the whitepaper output
+// directory, then runs a coherence pass to update index.md and bibliography.
+func (o *Orchestrator) FixWhitePaper(ctx context.Context, emit agent.EmitFunc, optFuncs ...FixOptionFunc) (FixResult, error) {
+	opts := &FixOptions{}
+	for _, fn := range optFuncs {
+		fn(opts)
+	}
+
+	// Load the plan saved during generation
+	planData, err := os.ReadFile(filepath.Join(opts.InputDir, "plan.json"))
+	if err != nil {
+		return FixResult{}, errors.Wrap(err, "could not read plan.json — was the whitepaper generated with a recent version of ghostwriter?")
+	}
+	var plan WhitePaperPlan
+	if err := json.Unmarshal(planData, &plan); err != nil {
+		return FixResult{}, errors.Wrap(err, "could not parse plan.json")
+	}
+
+	// Build context
+	ctx = withCtxPlan(ctx, plan)
+	if opts.StyleGuidelines != "" {
+		ctx = withCtxStyleGuidelines(ctx, opts.StyleGuidelines)
+	}
+	if opts.AdditionalContext != "" {
+		ctx = withCtxAdditionalContext(ctx, opts.AdditionalContext)
+	}
+
+	kb := opts.KnowledgeBase
+	if kb != nil {
+		ctx = withCtxKnowledgeBase(ctx, kb)
+		searcher := NewKnowledgeBaseAdapter(kb)
+		ctx = withCtxSearcher(ctx, searcher)
+	}
+
+	// Load all existing chapters (clean content, annotations stripped)
+	allChapters, err := loadChaptersFromDir(opts.InputDir)
+	if err != nil {
+		return FixResult{}, errors.Wrap(err, "could not load existing chapters")
+	}
+
+	// Parse all chapter files to find annotated ones
+	matches, err := filepath.Glob(filepath.Join(opts.InputDir, "chapter-*.md"))
+	if err != nil {
+		return FixResult{}, errors.Wrap(err, "could not glob chapter files")
+	}
+
+	var result FixResult
+
+	_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{Name: "Corrections"}))
+
+	for _, filePath := range matches {
+		af, err := ParseAnnotatedFile(filePath)
+		if err != nil {
+			return FixResult{}, errors.Wrapf(err, "could not parse %s", filePath)
+		}
+
+		if len(af.Annotations) == 0 {
+			result.SkippedFiles = append(result.SkippedFiles, filePath)
+			continue
+		}
+
+		_ = emit(agent.NewEvent(EventTypeChapterStart, &ChapterStartData{
+			Number: af.Number,
+			Total:  len(matches),
+			Title:  af.Title,
+			Target: countWords(af.CleanContent),
+		}))
+
+		// Build minimal Chapter struct from the file metadata
+		chapter := &Chapter{
+			ID:     strings.TrimSuffix(filepath.Base(filePath), ".md"),
+			Number: FlexInt(af.Number),
+			Title:  af.Title,
+		}
+
+		// Build ChapterContent with clean content (annotations removed)
+		content := ChapterContent{
+			ChapterID: chapter.ID,
+			Number:    af.Number,
+			Title:     af.Title,
+			Content:   af.CleanContent,
+			WordCount: countWords(af.CleanContent),
+		}
+
+		// Set up context: annotations + all chapters (enables query_document tool)
+		fixCtx := withCtxChapter(ctx, chapter)
+		fixCtx = withCtxAnnotations(fixCtx, af.Annotations)
+		fixCtx = withCtxAllChapters(fixCtx, allChapters)
+
+		// Serialize content for the editor input
+		contentJSON, err := json.Marshal(content)
+		if err != nil {
+			return FixResult{}, errors.Wrapf(err, "could not serialize chapter %q", af.Title)
+		}
+
+		var editedJSON string
+		editEmit := func(evt agent.Event) error {
+			switch evt.Type() {
+			case agent.EventTypeTextDelta:
+				return nil
+			case agent.EventTypeComplete:
+				editedJSON = evt.Data().(*agent.CompleteData).Message
+				return nil
+			}
+			return emit(evt)
+		}
+
+		if err := agent.NewRunner(o.chapterEditor).Run(fixCtx, agent.NewInput(string(contentJSON)), editEmit); err != nil {
+			return FixResult{}, errors.Wrapf(err, "could not fix chapter %q", af.Title)
+		}
+
+		var edited ChapterContent
+		if err := json.Unmarshal([]byte(editedJSON), &edited); err != nil {
+			return FixResult{}, errors.Wrapf(err, "could not parse edited chapter %q", af.Title)
+		}
+
+		// Write fixed chapter file immediately
+		fileContent := fmt.Sprintf("# %s\n\n%s\n", edited.Title, edited.Content)
+		if err := os.WriteFile(filePath, []byte(fileContent), 0644); err != nil {
+			return FixResult{}, errors.Wrapf(err, "could not write fixed chapter %q", filePath)
+		}
+
+		// Update the in-memory chapter list for the coherence pass
+		for i, ch := range allChapters {
+			if ch.Number == af.Number {
+				allChapters[i] = edited
+				break
+			}
+		}
+
+		result.FixedFiles = append(result.FixedFiles, filePath)
+
+		_ = emit(agent.NewEvent(EventTypeChapterDone, &ChapterDoneData{
+			Number:    edited.Number,
+			Total:     len(matches),
+			Title:     edited.Title,
+			WordCount: edited.WordCount,
+		}))
+	}
+
+	if len(result.FixedFiles) == 0 && !opts.ForceEnrichment {
+		_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{
+			Name: "Corrections",
+			Done: true,
+			Info: "aucune annotation trouvée",
+		}))
+		return result, nil
+	}
+
+	_ = emit(agent.NewEvent(EventTypePhase, &PhaseData{
+		Name: "Corrections",
+		Done: true,
+		Info: fmt.Sprintf("%d fichier(s) corrigé(s)", len(result.FixedFiles)),
+	}))
+
+	// Coherence pass with updated chapters
+	coherence, err := o.coherencePass(ctx, plan, allChapters, emit)
+	if err != nil {
+		return result, errors.Wrap(err, "coherence phase failed")
+	}
+
+	// Enrichment pass (citation linking + Mermaid diagrams)
+	allChapters, err = o.enrichChapters(ctx, allChapters, emit)
+	if err != nil {
+		return result, errors.Wrap(err, "enrichment phase failed")
+	}
+
+	// Collect sources from KB if available
+	sources := extractSources(ctx)
+	slices.SortFunc(sources, func(a, b article.Source) int {
+		if a.Relevance > b.Relevance {
+			return -1
+		}
+		if a.Relevance < b.Relevance {
+			return 1
+		}
+		return 0
+	})
+	if len(coherence.Bibliography) == 0 {
+		for _, s := range sources {
+			if s.URL != "" {
+				coherence.Bibliography = append(coherence.Bibliography, BibEntry{
+					URL:        s.URL,
+					Title:      s.Title,
+					SourceType: s.SourceType,
+				})
+			}
+		}
+	}
+
+	// Re-assemble to update index.md, bibliography.md, appendices
+	if _, err := Assemble(plan, allChapters, coherence, AssembleOptions{OutputDir: opts.InputDir}); err != nil {
+		return result, errors.Wrap(err, "assembly phase failed")
+	}
+
+	return result, nil
+}
+
+// FixWhitePaperInDir is a convenience function.
+func FixWhitePaperInDir(ctx context.Context, client llm.Client, emit agent.EmitFunc, optFuncs ...FixOptionFunc) (FixResult, error) {
+	o := NewOrchestrator(client)
+	return o.FixWhitePaper(ctx, emit, optFuncs...)
 }

@@ -1,6 +1,7 @@
 package whitepaper
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,6 +62,15 @@ func Assemble(plan WhitePaperPlan, chapters []ChapterContent, coherence Coherenc
 	indexContent := buildIndex(plan, coherence, chapterFiles, len(coherence.Appendices))
 	if err := os.WriteFile(indexPath, []byte(indexContent), 0644); err != nil {
 		return WhitePaper{}, errors.Wrap(err, "could not write index.md")
+	}
+
+	// Write plan.json so the fix command can reload the plan for coherence pass
+	planJSON, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return WhitePaper{}, errors.Wrap(err, "could not serialize plan")
+	}
+	if err := os.WriteFile(filepath.Join(opts.OutputDir, "plan.json"), planJSON, 0644); err != nil {
+		return WhitePaper{}, errors.Wrap(err, "could not write plan.json")
 	}
 
 	return WhitePaper{

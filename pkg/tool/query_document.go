@@ -22,12 +22,12 @@ import (
 func NewQueryDocumentTool(document string) llm.Tool {
 	return llm.NewFuncTool(
 		"query_document",
-		"Query the already-written sections of the document using a CSS-like selector (e.g. `h2`, `h2:contains(\"foo *\")`, `code[lang=\"go\"]`). "+
+		"Query the already-written sections of the document using one or more CSS-like selectors (e.g. `h2`, `h2:contains(\"foo *\")`, `code[lang=\"go\"]`, `table`). "+
 			"Returns the matching content as plain text. Use this to check for redundancies across sections.",
 		llm.NewJSONSchema().
-			RequiredProperty("selector", "CSS-like selector string (e.g. `h2`, `h2:contains(\"introduction *\")`, `code[lang=\"go\"]`)", "string"),
+			RequiredProperty("selectors", "Array of CSS-like selector strings (e.g. [\"h2\", \"code[lang=\\\"mermaid\\\"]\", \"table\"])", "array"),
 		func(_ context.Context, params map[string]any) (llm.ToolResult, error) {
-			selectorStr, err := llm.ToolParam[string](params, "selector")
+			selectors, err := llm.ToolParam[[]any](params, "selectors")
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
@@ -39,27 +39,36 @@ func NewQueryDocumentTool(document string) llm.Tool {
 			p.AddOptions(goldmarkparser.WithAutoHeadingID())
 			doc := p.Parse(text.NewReader(source))
 
-			sel, err := amatl.Parse(selectorStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
-			}
-
-			nodes := sel.FindAll(doc, source)
-			if len(nodes) == 0 {
-				return llm.NewToolResult("(no matches found for selector: " + selectorStr + ")"), nil
-			}
-
 			var buf bytes.Buffer
-			for _, n := range nodes {
-				lines := n.Lines()
-				if lines == nil {
+			for _, raw := range selectors {
+				selectorStr, ok := raw.(string)
+				if !ok {
 					continue
 				}
-				for i := 0; i < lines.Len(); i++ {
-					seg := lines.At(i)
-					buf.Write(source[seg.Start:seg.Stop])
+
+				sel, err := amatl.Parse(selectorStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid selector %q: %w", selectorStr, err)
 				}
-				buf.WriteByte('\n')
+
+				nodes := sel.FindAll(doc, source)
+				if len(nodes) == 0 {
+					fmt.Fprintf(&buf, "(no matches found for selector: %s)\n", selectorStr)
+					continue
+				}
+
+				fmt.Fprintf(&buf, "=== selector: %s ===\n", selectorStr)
+				for _, n := range nodes {
+					lines := n.Lines()
+					if lines == nil {
+						continue
+					}
+					for i := 0; i < lines.Len(); i++ {
+						seg := lines.At(i)
+						buf.Write(source[seg.Start:seg.Stop])
+					}
+					buf.WriteByte('\n')
+				}
 			}
 
 			return llm.NewToolResult(buf.String()), nil

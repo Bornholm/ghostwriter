@@ -19,6 +19,7 @@ const (
 	ctxKeyChapter          agent.ContextKey = "whitepaper_chapter"
 	ctxKeyPreviousChapter  agent.ContextKey = "whitepaper_previous_chapter"
 	ctxKeyAllChapters      agent.ContextKey = "whitepaper_all_chapters"
+	ctxKeyAnnotations      agent.ContextKey = "whitepaper_annotations"
 )
 
 func withCtxSubject(ctx context.Context, subject string) context.Context {
@@ -113,4 +114,13 @@ func withCtxAllChapters(ctx context.Context, ccs []ChapterContent) context.Conte
 func ctxAllChapters(ctx context.Context) ([]ChapterContent, bool) {
 	ccs, ok := ctx.Value(ctxKeyAllChapters).([]ChapterContent)
 	return ccs, ok
+}
+
+func withCtxAnnotations(ctx context.Context, annotations []string) context.Context {
+	return context.WithValue(ctx, ctxKeyAnnotations, annotations)
+}
+
+func ctxAnnotations(ctx context.Context) []string {
+	annotations, _ := ctx.Value(ctxKeyAnnotations).([]string)
+	return annotations
 }

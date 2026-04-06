@@ -3,20 +3,15 @@ package whitepaper
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/bornholm/genai/agent"
-	"github.com/bornholm/genai/llm/provider"
-	providerenv "github.com/bornholm/genai/llm/provider/env"
 	"github.com/bornholm/ghostwriter/internal/command/llmclient"
+	"github.com/bornholm/ghostwriter/internal/command/shared"
 	"github.com/bornholm/ghostwriter/pkg/article"
-	corpusadapter "github.com/bornholm/ghostwriter/pkg/knowledgebase/corpus"
 	wppkg "github.com/bornholm/ghostwriter/pkg/whitepaper"
-	"github.com/bornholm/corpus/pkg/corpus"
 	"github.com/gosimple/slug"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
@@ -28,10 +23,16 @@ func Whitepaper() *cli.Command {
 		Usage: "Write a complete white paper about the given subject",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "subject",
-				Required: true,
-				Aliases:  []string{"s"},
-				EnvVars:  []string{"GHOSTWRITER_SUBJECT"},
+				Name:    "subject",
+				Aliases: []string{"s"},
+				EnvVars: []string{"GHOSTWRITER_SUBJECT"},
+			},
+			&cli.StringFlag{
+				Name:      "subject-file",
+				Aliases:   []string{"sf"},
+				Usage:     "Path to a file whose content will be used as the subject",
+				TakesFile: true,
+				EnvVars:   []string{"GHOSTWRITER_SUBJECT_FILE"},
 			},
 			&cli.IntFlag{
 				Name:    "target-words",
@@ -110,6 +111,16 @@ func Whitepaper() *cli.Command {
 		},
 		Action: func(cliCtx *cli.Context) error {
 			subject := strings.TrimSpace(cliCtx.String("subject"))
+			if subjectFile := cliCtx.String("subject-file"); subjectFile != "" {
+				data, err := os.ReadFile(subjectFile)
+				if err != nil {
+					return errors.Wrap(err, "failed to read subject file")
+				}
+				subject = strings.TrimSpace(string(data))
+			}
+			if subject == "" {
+				return errors.New("subject is required: use --subject or --subject-file")
+			}
 			targetWords := cliCtx.Int("target-words")
 			outputDir := cliCtx.String("output-dir")
 			outputPDF := cliCtx.String("output-pdf")
@@ -163,7 +174,7 @@ func Whitepaper() *cli.Command {
 			}
 
 			// Build knowledge base: Corpus backend (default) or Bleve fallback.
-			kb, kbClose, err := buildKnowledgeBase(ctx, corpusStoragePath)
+			kb, kbClose, err := shared.BuildKnowledgeBase(ctx, corpusStoragePath)
 			if err != nil {
 				return errors.Wrap(err, "could not create knowledge base")
 			}
@@ -172,7 +183,7 @@ func Whitepaper() *cli.Command {
 			orchestratorOptions = append(orchestratorOptions, wppkg.WithKnowledgeBase(kb))
 
 			if len(files) > 0 {
-				if err := bootstrapKnowledgeBase(kb, files); err != nil {
+				if err := shared.BootstrapKnowledgeBase(kb, files); err != nil {
 					return errors.Wrap(err, "could not bootstrap knowledge base")
 				}
 			}
@@ -209,79 +220,3 @@ func Whitepaper() *cli.Command {
 	}
 }
 
-// buildKnowledgeBase creates a Corpus-backed knowledge base stored at storagePath.
-// A dedicated LLM client is first attempted via GHOSTWRITER_CORPUS_* env vars
-// (allows configuring a separate embeddings model). If those vars are absent,
-// it falls back to the main GHOSTWRITER_* provider. Corpus can also run without
-// an LLM client (disabling vector search, HyDE and Judge).
-func buildKnowledgeBase(ctx context.Context, storagePath string) (article.KnowledgeBase, func() error, error) {
-	// Try a dedicated Corpus LLM client first (GHOSTWRITER_CORPUS_EMBEDDINGS_* etc.)
-	corpusLLMClient, err := provider.Create(ctx, providerenv.With("GHOSTWRITER_CORPUS_", ".env"))
-	if err != nil {
-		// Fall back to the main provider (embeddings may not be configured).
-		corpusLLMClient, _ = provider.Create(ctx, providerenv.With("GHOSTWRITER_", ".env"))
-	}
-	if corpusLLMClient != nil {
-		corpusLLMClient = llmclient.Wrap(corpusLLMClient)
-	}
-
-	if err := os.MkdirAll(storagePath, 0755); err != nil {
-		return nil, nil, errors.Wrap(err, "could not create corpus storage directory")
-	}
-
-	corpusOpts := []corpus.OptionFunc{
-		corpus.WithStoragePath(storagePath),
-		corpus.WithDisableHyDE(),
-		corpus.WithDisableJudge(),
-	}
-	if corpusLLMClient != nil {
-		corpusOpts = append(corpusOpts, corpus.WithLLMClient(corpusLLMClient))
-	}
-
-	c, err := corpus.New(ctx, corpusOpts...)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "could not initialise corpus")
-	}
-
-	collectionID, err := c.CreateCollection(ctx, "ghostwriter")
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "could not create corpus collection")
-	}
-
-	kb := corpusadapter.New(c, collectionID)
-	return kb, func() error { return nil }, nil
-}
-
-func bootstrapKnowledgeBase(kb article.KnowledgeBase, files []string) error {
-	for _, f := range files {
-		matches, err := filepath.Glob(f)
-		if err != nil {
-			return errors.Wrapf(err, "could not match file pattern '%s'", f)
-		}
-		for _, m := range matches {
-			absPath, err := filepath.Abs(m)
-			if err != nil {
-				return errors.Wrapf(err, "could not retrieve absolute path for file '%s'", m)
-			}
-
-			data, err := os.ReadFile(m)
-			if err != nil {
-				return errors.Wrapf(err, "could not read file '%s'", m)
-			}
-
-			u := &url.URL{Scheme: "file", Path: absPath}
-			err = kb.AddDocument(article.ResearchDocument{
-				URL:        u.String(),
-				Title:      filepath.Base(m),
-				Content:    string(data),
-				Keywords:   []string{},
-				SourceType: "file",
-				Relevance:  1,
-			})
-			if err != nil {
-				return errors.WithStack(err)
-			}
-		}
-	}
-	return nil
-}

@@ -4,14 +4,14 @@ go 1.25.5
 
 require (
 	charm.land/lipgloss/v2 v2.0.0
-	github.com/Bornholm/amatl v0.21.1
+	github.com/Bornholm/amatl v0.30.0
 	github.com/Davincible/chromedp-undetected v1.3.8
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.4.0
 	github.com/PuerkitoBio/goquery v1.11.0
 	github.com/abadojack/whatlanggo v1.0.1
 	github.com/blevesearch/bleve/v2 v2.5.5
-	github.com/bornholm/corpus v0.0.0-20260401201117-cde2117bc8dd
-	github.com/bornholm/genai v0.17.1
+	github.com/bornholm/corpus v0.0.0-20260406205341-7b76843b443e
+	github.com/bornholm/genai v0.19.0
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
@@ -253,10 +253,10 @@ require (
 	gorm.io/gorm v1.25.12 // indirect
 )
 
-replace github.com/bornholm/genai => ../genai
+// replace github.com/bornholm/genai => ../genai
 
-replace github.com/Bornholm/amatl => ../amatl
+// replace github.com/Bornholm/amatl => ../amatl
 
-replace github.com/bornholm/corpus => ../corpus
+// replace github.com/bornholm/corpus => ../corpus
 
 replace github.com/asg017/sqlite-vec-go-bindings => github.com/Bornholm/sqlite-vec-go-bindings v0.0.0-20250407170538-55971919e573

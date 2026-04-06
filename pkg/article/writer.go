@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"text/template"
+	"time"
 
 	"github.com/bornholm/genai/agent"
 	"github.com/bornholm/genai/agent/loop"
@@ -66,7 +68,9 @@ func (h *WriterHandler) writeSection(ctx context.Context, section DocumentSectio
 		})
 
 	// Load the writer system prompt
-	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil)
+	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil, prompt.WithFuncs(template.FuncMap{
+		"now": func() string { return time.Now().Format("2006-01-02") },
+	}))
 	if err != nil {
 		return SectionContent{}, errors.WithStack(err)
 	}
@@ -225,7 +229,9 @@ func (h *WriterHandler) reviseSection(ctx context.Context, section DocumentSecti
 			"round":         round,
 		})
 
-	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil)
+	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil, prompt.WithFuncs(template.FuncMap{
+		"now": func() string { return time.Now().Format("2006-01-02") },
+	}))
 	if err != nil {
 		return SectionContent{}, errors.WithStack(err)
 	}

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"text/template"
+	"time"
 
 	"github.com/bornholm/genai/agent"
 	"github.com/bornholm/genai/agent/loop"
@@ -55,7 +57,9 @@ func (h *ChapterWriterHandler) Handle(ctx context.Context, input agent.Input, em
 }
 
 func (h *ChapterWriterHandler) writeChapter(ctx context.Context, chapter *Chapter, subject string, ks KnowledgeSearcher, previous *ChapterContent, emit agent.EmitFunc) (ChapterContent, error) {
-	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil)
+	systemPrompt, err := prompt.FromFS[any](&writerPrompts, "prompts/writer_system.gotmpl", nil, prompt.WithFuncs(template.FuncMap{
+		"now": func() string { return time.Now().Format("2006-01-02") },
+	}))
 	if err != nil {
 		return ChapterContent{}, errors.WithStack(err)
 	}

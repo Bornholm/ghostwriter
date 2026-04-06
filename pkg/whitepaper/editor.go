@@ -31,10 +31,7 @@ func (h *ChapterEditorHandler) Handle(ctx context.Context, input agent.Input, em
 		return errors.New("chapter not found in context")
 	}
 
-	ks, ok := ctxSearcher(ctx)
-	if !ok {
-		return errors.New("knowledge searcher not found in context")
-	}
+	ks, _ := ctxSearcher(ctx)
 
 	// Get written content from input
 	content := ChapterContent{}
@@ -71,9 +68,12 @@ func (h *ChapterEditorHandler) editChapter(ctx context.Context, content ChapterC
 		return ChapterContent{}, errors.WithStack(err)
 	}
 
-	userPrompt := h.buildPrompt(content, chapter, plan, subject, ctxStyleGuidelines(ctx), ctxAdditionalContext(ctx))
+	userPrompt := h.buildPrompt(content, chapter, plan, subject, ctxStyleGuidelines(ctx), ctxAdditionalContext(ctx), ctxAnnotations(ctx))
 
-	tools := []llm.Tool{NewSearchKnowledgeBaseTool(ks)}
+	var tools []llm.Tool
+	if ks != nil {
+		tools = append(tools, NewSearchKnowledgeBaseTool(ks))
+	}
 
 	// If previous chapters are available, expose them via query_document so the
 	// editor can detect cross-chapter redundancies.
@@ -117,7 +117,7 @@ func (h *ChapterEditorHandler) editChapter(ctx context.Context, content ChapterC
 	}, nil
 }
 
-func (h *ChapterEditorHandler) buildPrompt(content ChapterContent, chapter *Chapter, plan WhitePaperPlan, subject, styleGuidelines, additionalContext string) string {
+func (h *ChapterEditorHandler) buildPrompt(content ChapterContent, chapter *Chapter, plan WhitePaperPlan, subject, styleGuidelines, additionalContext string, annotations []string) string {
 	var b strings.Builder
 
 	b.WriteString("Edit and enhance this chapter of a professional white paper.\n\n")
@@ -148,7 +148,13 @@ func (h *ChapterEditorHandler) buildPrompt(content ChapterContent, chapter *Chap
 		}
 	}
 
-	if content.WordCount < chapter.WordCount {
+	if len(annotations) > 0 {
+		b.WriteString("\n**Reviewer Annotations to Address (PRIORITY):**\n")
+		for i, ann := range annotations {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, ann)
+		}
+		b.WriteString("\n**Action needed:** Address ALL reviewer annotations above while maintaining chapter quality.\n")
+	} else if content.WordCount < chapter.WordCount {
 		gap := chapter.WordCount - content.WordCount
 		fmt.Fprintf(&b, "\n**Action needed:** Expand by approximately %d words with quality research-backed content.\n", gap)
 	} else {
