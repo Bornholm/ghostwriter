@@ -91,12 +91,10 @@ func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, dep
 	// Initialize progress tracking
 	tracker := NewProgressTracker(ctx)
 
-	tracker.EmitSubProgress(PhaseResearching, "Initializing structured research process",
-		GetPhaseBaseProgress(PhaseResearching), 0.05, ResearchingWeight, map[string]interface{}{
-			"step":    "initialization",
-			"subject": subject,
-			"depth":   depth,
-		})
+	tracker.EmitProgress(PhaseResearching, "Initializing research", 0.05, map[string]any{
+		"subject": subject,
+		"depth":   depth,
+	})
 
 	// Initialize research state
 	state := &ResearchState{
@@ -108,12 +106,7 @@ func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, dep
 		ContentSummaries: make([]string, 0),
 	}
 
-	tracker.EmitSubProgress(PhaseResearching, fmt.Sprintf("Target: %d articles, Max iterations: %d", state.TargetArticles, state.MaxIterations),
-		GetPhaseBaseProgress(PhaseResearching), 0.1, ResearchingWeight, map[string]interface{}{
-			"step":            "target_set",
-			"target_articles": state.TargetArticles,
-			"max_iterations":  state.MaxIterations,
-		})
+	tracker.EmitProgress(PhaseResearching, fmt.Sprintf("Target: %d articles, max iterations: %d", state.TargetArticles, state.MaxIterations), 0.1, nil)
 
 	// Main research loop
 	for state.CurrentIteration < state.MaxIterations && state.TotalArticles < state.TargetArticles {
@@ -121,12 +114,7 @@ func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, dep
 
 		iterationProgress := 0.1 + (0.8 * float64(state.CurrentIteration-1) / float64(state.MaxIterations))
 
-		tracker.EmitSubProgress(PhaseResearching, fmt.Sprintf("Starting iteration %d/%d", state.CurrentIteration, state.MaxIterations),
-			GetPhaseBaseProgress(PhaseResearching), iterationProgress, ResearchingWeight, map[string]interface{}{
-				"step":      "iteration_start",
-				"iteration": state.CurrentIteration,
-				"articles":  state.TotalArticles,
-			})
+		tracker.EmitProgress(PhaseResearching, fmt.Sprintf("Iteration %d/%d", state.CurrentIteration, state.MaxIterations), iterationProgress, nil)
 
 		// Generate search queries for this iteration
 		queries, err := h.generateSearchQueries(ctx, subject, state.ContentSummaries, state.CurrentIteration)
@@ -159,21 +147,13 @@ func (h *ResearchAgent) conductResearch(ctx context.Context, subject string, dep
 			state.ContentSummaries = append(state.ContentSummaries, summary)
 		}
 
-		tracker.EmitSubProgress(PhaseResearching, fmt.Sprintf("Iteration %d complete: %d/%d articles collected", state.CurrentIteration, state.TotalArticles, state.TargetArticles),
-			GetPhaseBaseProgress(PhaseResearching), iterationProgress+0.1, ResearchingWeight, map[string]interface{}{
-				"step":      "iteration_complete",
-				"iteration": state.CurrentIteration,
-				"articles":  state.TotalArticles,
-				"target":    state.TargetArticles,
-			})
+		tracker.EmitProgress(PhaseResearching,
+			fmt.Sprintf("Iteration %d complete: %d/%d articles", state.CurrentIteration, state.TotalArticles, state.TargetArticles),
+			iterationProgress+0.1, nil)
 	}
 
 	stats := kb.GetStats()
-	tracker.EmitSubProgress(PhaseResearching, fmt.Sprintf("Research completed: %d documents indexed", stats["total_documents"]),
-		GetPhaseBaseProgress(PhaseResearching), 1.0, ResearchingWeight, map[string]interface{}{
-			"step":  "research_complete",
-			"stats": stats,
-		})
+	tracker.EmitProgress(PhaseResearching, fmt.Sprintf("Research complete: %d documents indexed", stats["total_documents"]), 1.0, nil)
 
 	return nil
 }
@@ -304,10 +284,7 @@ func (h *ResearchAgent) addToKnowledgeBaseWithDeduplication(ctx context.Context,
 		if article.Title != "" {
 			step = fmt.Sprintf("Indexed: [%s] %s", article.Title, article.URL)
 		}
-		tracker.EmitSubProgress(PhaseResearching, step,
-			GetPhaseBaseProgress(PhaseResearching),
-			float64(state.TotalArticles)/float64(state.TargetArticles),
-			ResearchingWeight, nil)
+		tracker.EmitProgress(PhaseResearching, step, float64(state.TotalArticles)/float64(state.TargetArticles), nil)
 	}
 	return nil
 }

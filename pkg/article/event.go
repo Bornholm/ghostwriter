@@ -5,45 +5,7 @@ import (
 	"time"
 )
 
-// DocumentSection represents a section in the article plan
-type DocumentSection struct {
-	ID          string   `json:"-"`
-	Title       string   `json:"title" jsonschema:"required,description=Title of the section"`
-	Description string   `json:"description" jsonschema:"required,description=Description or guidance for writing this section"`
-	KeyPoints   []string `json:"key_points" jsonschema:"required,description=Key points to cover in this section"`
-	WordCount   int      `json:"word_count" jsonschema:"required,description=Target word count for this section"`
-}
-
-// DocumentPlan represents the complete article structure
-type DocumentPlan struct {
-	Title      string             `json:"title" jsonschema:"required,description=The main title of the article"`
-	Sections   []*DocumentSection `json:"sections" jsonschema:"required,description=Array of document sections"`
-	TotalWords int                `json:"total_words" jsonschema:"required,description=Target total number of words for the article"`
-	Keywords   []string           `json:"keywords" jsonschema:"required,description=Principal keywords illustrating the article"`
-}
-
-// SectionContent represents completed content for a section
-type SectionContent struct {
-	Title     string `json:"title"`
-	Content   string `json:"content"`
-	WordCount int    `json:"word_count"`
-}
-
-// Document represents the final complete article
-type Document struct {
-	DocumentMetadata
-	Summary  string           `json:"summary"`
-	Content  string           `json:"content"`
-	Sections []SectionContent `json:"sections"`
-}
-
-type DocumentMetadata struct {
-	Title     string   `json:"title"`
-	WordCount int      `json:"word_count"`
-	Keywords  []string `json:"keywords"`
-	Sources   []Source `json:"sources"`
-}
-
+// Source represents a research source document.
 type Source struct {
 	ID         string   `json:"id"`
 	URL        string   `json:"url"`
@@ -51,13 +13,6 @@ type Source struct {
 	Keywords   []string `json:"keywords"`
 	SourceType string   `json:"source_type"` // "web", "article", "academic", "news"
 	Relevance  float64  `json:"relevance"`
-}
-
-// SectionReview is the result returned by the reviewer agent for a section
-type SectionReview struct {
-	Approved bool   `json:"approved"`
-	Content  string `json:"content"`  // set when Approved=true, contains polished content
-	Feedback string `json:"feedback"` // set when Approved=false, contains revision instructions
 }
 
 // ProgressPhase represents the current phase of article generation
@@ -68,9 +23,8 @@ const (
 	PhaseResearching  ProgressPhase = "researching"
 	PhasePlanning     ProgressPhase = "planning"
 	PhaseWriting      ProgressPhase = "writing"
-	PhaseReviewing    ProgressPhase = "reviewing"
-	PhaseEditing      ProgressPhase = "editing" // kept for progress.go compat, will be removed with old editor
-	PhaseAttributing  ProgressPhase = "attributing"
+	PhaseEditing     ProgressPhase = "editing"
+	PhaseAttributing ProgressPhase = "attributing"
 	PhaseCompleted    ProgressPhase = "completed"
 )
 
